@@ -7,6 +7,10 @@ $agentExe = (Resolve-Path 'artifacts/pilot/Agent/Club.Agent.exe').Path
 $temp = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N') + '.json')
 $user = $null
 $registered = $false
+function Resolve-AccountSid([string]$Value) {
+    if ($Value -match '^S-1-') { return $Value }
+    return (New-Object Security.Principal.NTAccount($Value)).Translate([Security.Principal.SecurityIdentifier]).Value
+}
 try {
     $password = ConvertTo-SecureString ([Guid]::NewGuid().ToString('N') + '!aA7') -AsPlainText -Force
     $user = New-LocalUser -Name $account -Password $password -Description 'Disposable Club CI test account'
@@ -14,10 +18,10 @@ try {
     $registered = $true
     [xml]$xml = Export-ScheduledTask -TaskName 'ClubVisitor' -TaskPath '\'
     $principal = $xml.Task.Principals.Principal
-    if ($principal.UserId -ne $user.SID.Value -or $principal.RunLevel -ne 'LeastPrivilege' -or $principal.LogonType -ne 'InteractiveToken') {
-        throw 'Startup principal is not the specified limited interactive visitor.'
+    if ((Resolve-AccountSid $principal.UserId) -ne $user.SID.Value -or $principal.RunLevel -ne 'LeastPrivilege' -or $principal.LogonType -ne 'InteractiveToken') {
+        throw "Incorrect startup principal: user=$($principal.UserId), level=$($principal.RunLevel), logon=$($principal.LogonType)"
     }
-    if ($xml.Task.Triggers.LogonTrigger.UserId -ne $user.SID.Value -or $xml.Task.Actions.Exec.Command -ne $visitorExe) {
+    if ((Resolve-AccountSid $xml.Task.Triggers.LogonTrigger.UserId) -ne $user.SID.Value -or $xml.Task.Actions.Exec.Command -ne $visitorExe) {
         throw 'Incorrect logon trigger or executable.'
     }
     if ($xml.Task.Settings.ExecutionTimeLimit -ne 'PT0S') { throw 'Visitor would be killed by a task time limit.' }
