@@ -225,7 +225,17 @@ internal sealed class MainWindow : Form
         if (Staff)
         {
             var text = tabs.TabPages.Cast<TabPage>().SelectMany(p => p.Controls.Cast<Control>()).OfType<TextBox>().Single();
-            text.Text = JsonSerializer.Serialize(snapshot.GetProperty("report"), new JsonSerializerOptions { WriteIndented = true });
+            var report = snapshot.GetProperty("report");
+            var lines = new List<string>();
+            foreach (var (key, label) in new[] { ("topUpsMinor", "Пополнения"), ("purchasesMinor", "Покупки"),
+                ("refundsMinor", "Выданные возвраты"), ("walletBalancesMinor", "Остатки на балансах"),
+                ("cashNetMinor", "Наличные: получено минус возвраты"), ("transferNetMinor", "Переводы: получено минус возвраты") })
+                lines.Add($"{label}: {report.GetProperty(key).GetInt64() / 100m:0.00} сом");
+            lines.Add(""); lines.Add("Операции сотрудников за всё время:");
+            foreach (var row in report.GetProperty("byEmployee").EnumerateArray())
+                lines.Add($"{row.GetProperty("username")}: {(row.GetProperty("kind").GetString() == "TopUp" ? "Пополнение" : "Возврат")}, " +
+                    $"{(row.GetProperty("method").GetString() == "Cash" ? "наличные" : "перевод")} — {row.GetProperty("amountMinor").GetInt64() / 100m:0.00} сом, операций: {row.GetProperty("operations")}");
+            text.Text = string.Join(Environment.NewLine, lines);
         }
         var user = snapshot.GetProperty("user");
         status.Text = $"{user.GetProperty("username")} · Баланс: {user.GetProperty("balanceMinor").GetInt64() / 100m:0.00} сом. Команда выполнена, когда её номер совпал с подтверждением ПК.";

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+mkdir -p work artifacts
 root=artifacts/club-pilot-0.2-win-x64
 # Build only into a new staging directory so a developer's data/config cannot enter the ZIP.
 staging=$(mktemp -d "$PWD/work/publish.XXXXXX")
