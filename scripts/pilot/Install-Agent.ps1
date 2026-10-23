@@ -8,6 +8,8 @@ param(
     [Parameter(Mandatory)][string]$CertificateThumbprint
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'VisitorStartup.ps1')
+if (Get-ScheduledTask -TaskName 'ClubVisitor' -TaskPath '\' -ErrorAction SilentlyContinue) { throw 'ClubVisitor startup task already exists. Inspect it before installing.' }
 $serverUri = [Uri]$ServerUrl
 if ($serverUri.Scheme -ne 'https' -or $serverUri.AbsolutePath -ne '/' -or $serverUri.UserInfo) { throw 'Use an HTTPS server URL without credentials or a path.' }
 $visitor = Get-LocalUser -Name $VisitorUser
@@ -33,6 +35,9 @@ Copy-Item -Path (Join-Path $PSScriptRoot '..\Agent') -Destination $root -Recurse
 Copy-Item -Path (Join-Path $PSScriptRoot '..\Visitor') -Destination $root -Recurse -Force
 $config = @{ serverUrl = $ServerUrl; computerId = $binding.computerId; token = $binding.token; visitorSid = $visitor.SID.Value }
 $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $data 'agent.json') -Encoding UTF8
+if (-not (Test-Path (Join-Path $data 'games.json'))) {
+    '[]' | Set-Content -LiteralPath (Join-Path $data 'games.json') -Encoding UTF8
+}
 $alreadyTrusted = Test-Path ('Cert:\LocalMachine\Root\' + $cert.Thumbprint)
 if (-not $alreadyTrusted) { Import-Certificate -FilePath $ServerCertificate -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null }
 @{ certificateThumbprint = $cert.Thumbprint; addedTrust = (-not $alreadyTrusted); visitorSid = $visitor.SID.Value } |
@@ -43,6 +48,11 @@ New-Service -Name ClubAgent -BinaryPathName ('"' + $exe + '"') -DisplayName 'Clu
 if ($LASTEXITCODE -ne 0) { throw 'Could not configure service recovery.' }
 & sc.exe failureflag ClubAgent 1 | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not configure failure recovery.' }
+$visitorExe = Join-Path $root 'Visitor\Club.Visitor.exe'
+Register-ClubVisitorStartup -VisitorSid $visitor.SID.Value -Executable $visitorExe
+@{ certificateThumbprint = $cert.Thumbprint; addedTrust = (-not $alreadyTrusted); visitorSid = $visitor.SID.Value; startupTask = 'ClubVisitor' } |
+    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $data 'installation.json') -Encoding UTF8
 Start-Service ClubAgent
-Write-Host 'Installed. Start Club.Visitor.exe as the specified standard user. No Windows shell/kiosk policy was changed.'
+Write-Host 'Installed. Visitor starts at the next logon of the specified standard user, with limited rights.'
+Write-Host 'Configure installed games with Set-Games.ps1. No Windows shell/kiosk/autologon policy was changed.'
 Write-Host 'Delete the transported binding file after checking the installation. Keep the admin copy secure.'

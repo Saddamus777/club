@@ -13,6 +13,12 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+#if VISITOR
+        // Manual launch and the logon task must not compete for the single visitor pipe.
+        using var instance = new Mutex(true, "Local\\Club.Visitor." + WindowsIdentity.GetCurrent().User!.Value +
+            (args.Contains("--smoke-test") ? ".Smoke" : ""), out var firstInstance);
+        if (!firstInstance) return;
+#endif
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) => MessageBox.Show(e.Exception.Message, "Клуб: ошибка");
@@ -135,7 +141,13 @@ internal sealed class MainWindow : Form
             Button("Пауза", () => Session("pause")); Button("Продолжить", () => Session("resume")); Button("Завершить", () => Session("end"));
             Button("Бесплатное время", FreeSession); Button("Возврат", Refund); Button("Привязать ПК", BindDevice);
         }
-        else Button("Купить выбранный пакет", Purchase);
+        else
+        {
+            Button("Купить выбранный пакет", Purchase);
+            Button("Список игр", RefreshGames);
+            Button("Запустить игру", LaunchGame);
+            Grid("games", "Игры и браузер", ("id", "ID"), ("name", "Название"));
+        }
         Grid("packages", "Пакеты", ("id", "ID"), ("name", "Название"), ("minutes", "Минуты"), ("priceMinor", "Цена, тыйын"), ("active", "Активен"));
         Grid("sessions", "Сеансы", ("id", "ID"), ("username", "Посетитель"), ("computerName", "ПК"), ("packageName", "Пакет"), ("remainingMs", "Остаток, мс"), ("status", "Состояние"), ("revision", "Команда"), ("ackRevision", "Подтверждение"), ("availableRefundMinor", "Доступный возврат, тыйын"));
         if (Staff)
@@ -173,6 +185,13 @@ internal sealed class MainWindow : Form
             if (File.Exists(pendingFile)) status.Text += " Есть запрос с неизвестным исходом: повторите его после входа.";
             await Task.CompletedTask;
             refresh.Start();
+            if (!Staff)
+            {
+                busy = true;
+                try { await RefreshGames(); }
+                catch (Exception ex) { status.Text = ex.Message; }
+                finally { busy = false; }
+            }
         };
         refresh.Tick += async (_, _) =>
         {
@@ -254,6 +273,7 @@ internal sealed class MainWindow : Form
         snapshot = await transport.Request("/api/state");
         foreach (var (name, grid) in grids)
         {
+            if (name == "games") continue;
             var selected = grid.SelectedRows.Count == 1 ? Convert.ToString(grid.SelectedRows[0].Cells[0].Value) : null;
             grid.Rows.Clear();
             foreach (var row in snapshot.GetProperty(name).EnumerateArray())
@@ -280,6 +300,32 @@ internal sealed class MainWindow : Form
         }
         var user = snapshot.GetProperty("user");
         status.Text = $"{user.GetProperty("username")} · Баланс: {user.GetProperty("balanceMinor").GetInt64() / 100m:0.00} сом. Команда выполнена, когда её номер совпал с подтверждением ПК.";
+    }
+    private async Task RefreshGames()
+    {
+        var games = await transport.Request("/local/games");
+        var grid = grids["games"];
+        var selected = grid.SelectedRows.Count == 1 ? Convert.ToString(grid.SelectedRows[0].Cells[0].Value) : null;
+        grid.Rows.Clear();
+        foreach (var game in games.Deserialize<GameSummary[]>(ApiClient.Json)!)
+        {
+            var row = grid.Rows.Add(game.Id, game.Name);
+            if (game.Id == selected) grid.Rows[row].Selected = true;
+        }
+        if (grid.Rows.Count == 0) status.Text = "Каталог пуст. Сотрудник должен добавить установленные игры.";
+    }
+    private async Task LaunchGame()
+    {
+        var result = await transport.Request("/local/games/launch", new GameLaunchRequest(Selected("games")));
+        var approval = result.Deserialize<GameLaunchApproval>(ApiClient.Json)!;
+        var local = (await transport.Request("/local/status")).Deserialize<AgentStatus>(ApiClient.Json)!;
+        if (local.Grant.State != "Running" || local.Grant.RemainingMs <= 0 ||
+            local.Grant.SessionId != approval.SessionId || local.Grant.Revision != approval.Revision)
+            throw new InvalidOperationException("Состояние сеанса изменилось. Запуск отменён.");
+        // This process belongs to the standard visitor, never to the LocalSystem service.
+        using var process = Process.Start(GameCatalog.StartInfo(approval.Game))
+            ?? throw new InvalidOperationException("Не удалось запустить программу.");
+        status.Text = "Запущено: " + approval.Game.Name;
     }
     private async Task LocalStatus()
     {

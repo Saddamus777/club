@@ -40,6 +40,11 @@ jobs:
           }
           Copy-Item scripts/pilot artifacts/pilot/Setup -Recurse
           Copy-Item docs/windows-pilot.md artifacts/pilot/READ-ME.md
+          Copy-Item docs/validation.md artifacts/pilot/validation.md
+      - name: Verify visitor startup task and game catalog on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/windows-startup.ps1
       - name: Start both native Windows windows (no service installation)
         if: runner.os == 'Windows'
         shell: pwsh
