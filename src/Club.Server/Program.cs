@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Diagnostics;
+using System.Net;
 using System.Threading.RateLimiting;
 using Club.Server;
 using Microsoft.AspNetCore.Antiforgery;
@@ -136,9 +138,18 @@ app.Use(async (context, next) =>
 app.MapGet("/health", () => Results.Ok(new { status = "ok", prototype = true }));
 app.MapGet("/api/security", (HttpContext context, IAntiforgery antiforgery) =>
     Results.Ok(new { token = antiforgery.GetAndStoreTokens(context).RequestToken, ownerExists = store.HasOwner() }));
+app.MapPost("/api/setup/owner", (OwnerSetupRequest request, HttpContext context) =>
+{
+    // First-run setup is local-only, CSRF-protected and atomically disabled after one owner exists.
+    var address = context.Connection.RemoteIpAddress;
+    if (address is null || !IPAddress.IsLoopback(address)) throw new RuleException("Первоначальная настройка доступна только на компьютере сервера.", 403);
+    if (request.Password != request.ConfirmPassword) throw new RuleException("Пароли не совпадают.");
+    var account = store.CreateAccount(request.Username ?? "", request.Password ?? "", "Owner");
+    return Results.Ok(new { account.Id, account.Username, account.Role });
+}).RequireRateLimiting("auth");
 app.MapPost("/api/register", (RegisterRequest request) =>
 {
-    if (!store.HasOwner()) throw new RuleException("Сначала создайте владельца через команду --create-owner.", 409);
+    if (!store.HasOwner()) throw new RuleException("Сначала завершите первоначальную настройку на стартовой странице.", 409);
     var account = store.CreateAccount(request.Username ?? "", request.Password ?? "");
     return Results.Ok(new { account.Id, account.Username });
 }).RequireRateLimiting("auth");
@@ -177,6 +188,17 @@ admin.MapPost("/backups", (ClaimsPrincipal user) =>
     var backup = store.Backup(Id(user));
     return Results.File(backup, "application/vnd.sqlite3", Path.GetFileName(backup));
 });
+if (args.Contains("--open-browser") && OperatingSystem.IsWindows())
+{
+    app.Lifetime.ApplicationStarted.Register(() =>
+    {
+        try { Process.Start(new ProcessStartInfo("http://127.0.0.1:5080") { UseShellExecute = true }); }
+        catch (Exception ex)
+        {
+            app.Logger.LogWarning(ex, "Could not open the browser. Use 03-open.cmd while the server is running.");
+        }
+    });
+}
 app.Run();
 
 static string Id(ClaimsPrincipal user) => user.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new RuleException("Войдите в аккаунт.", 401);

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Club.Server;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
@@ -13,13 +14,14 @@ using Xunit;
 
 namespace Club.Tests;
 
-public sealed class ApiFactory : WebApplicationFactory<Program>
+public sealed class ApiFactory(bool loopback = true) : WebApplicationFactory<Program>
 {
     public string DirectoryPath { get; } = Path.Combine(Path.GetTempPath(), "club-api-" + Guid.NewGuid().ToString("N"));
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.ConfigureServices(services =>
         {
+            services.AddSingleton<IStartupFilter>(new RemoteAddressFilter(loopback ? IPAddress.Loopback : IPAddress.Parse("192.0.2.10")));
             services.RemoveAll<ClubStore>();
             var worker = services.FirstOrDefault(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(SessionWorker));
             if (worker is not null) services.Remove(worker);
@@ -32,6 +34,19 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         base.Dispose(disposing);
         if (disposing && Directory.Exists(DirectoryPath)) Directory.Delete(DirectoryPath, true);
     }
+}
+
+public sealed class RemoteAddressFilter(IPAddress address) : IStartupFilter
+{
+    public Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> Configure(Action<Microsoft.AspNetCore.Builder.IApplicationBuilder> next) => app =>
+    {
+        app.Use((context, continuation) =>
+        {
+            context.Connection.RemoteIpAddress = address;
+            return continuation(context);
+        });
+        next(app);
+    };
 }
 
 public sealed class ApiTests
@@ -51,6 +66,60 @@ public sealed class ApiTests
         var response = await client.PostAsJsonAsync("/api/login", new { username, password = Password });
         response.EnsureSuccessStatusCode();
         await Token(client);
+    }
+
+    [Fact]
+    public async Task FirstRunOwnerCanBeCreatedLocallyAndCannotBeOverwritten()
+    {
+        using var factory = new ApiFactory();
+        using var client = factory.CreateClient();
+        await Token(client);
+        var request = new OwnerSetupRequest("owner", Password, Password);
+        var created = await client.PostAsJsonAsync("/api/setup/owner", request);
+        created.EnsureSuccessStatusCode();
+        Assert.Equal("Owner", (await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("role").GetString());
+        var again = await client.PostAsJsonAsync("/api/setup/owner", request with { Username = "another" });
+        Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
+        Assert.Null(factory.Services.GetRequiredService<ClubStore>().FindAccount("another", true));
+        await Login(client, "owner");
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/state")).StatusCode);
+    }
+
+    [Fact]
+    public async Task OwnerSetupRequiresCsrfAndMatchingPasswords()
+    {
+        using var factory = new ApiFactory();
+        using var client = factory.CreateClient();
+        var request = new OwnerSetupRequest("owner", Password, Password);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/setup/owner", request)).StatusCode);
+        await Token(client);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/setup/owner", request with { ConfirmPassword = "different" })).StatusCode);
+        Assert.False(factory.Services.GetRequiredService<ClubStore>().HasOwner());
+    }
+
+    [Fact]
+    public async Task OwnerSetupRejectsNonLoopbackRequests()
+    {
+        using var factory = new ApiFactory(loopback: false);
+        using var client = factory.CreateClient();
+        await Token(client);
+        var response = await client.PostAsJsonAsync("/api/setup/owner", new OwnerSetupRequest("owner", Password, Password));
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.False(factory.Services.GetRequiredService<ClubStore>().HasOwner());
+    }
+
+    [Fact]
+    public async Task ConcurrentFirstRunRequestsCreateOnlyOneOwner()
+    {
+        using var factory = new ApiFactory();
+        using var first = factory.CreateClient();
+        using var second = factory.CreateClient();
+        await Token(first); await Token(second);
+        var responses = await Task.WhenAll(
+            first.PostAsJsonAsync("/api/setup/owner",new OwnerSetupRequest("owner1",Password,Password)),
+            second.PostAsJsonAsync("/api/setup/owner",new OwnerSetupRequest("owner2",Password,Password)));
+        Assert.Single(responses, x => x.StatusCode == HttpStatusCode.OK);
+        Assert.Single(responses, x => x.StatusCode == HttpStatusCode.Conflict);
     }
 
     [Fact]

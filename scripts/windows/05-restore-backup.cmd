@@ -2,14 +2,14 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 if "%~1"=="" goto usage
-echo Сначала остановите сервер. Операции после даты копии исчезнут из активной базы.
-echo Текущая база будет сохранена отдельно. Сеансы потребуют ручного возобновления.
-choice /c YN /n /m "Восстановить копию? Y = да, N = нет: "
+echo Stop the server first. Operations after this backup will be absent from the restored database.
+echo The current database will be preserved separately. Sessions will require manual resumption.
+choice /c YN /n /m "Restore this backup? Y = yes, N = no: "
 if errorlevel 2 exit /b
 Club.Server.exe --restore-backup "%~f1"
-if errorlevel 1 echo Восстановление не завершилось. Сохраните сообщение об ошибке.
+if errorlevel 1 echo Restore failed. Copy the error above.
 pause
 exit /b
 :usage
-echo Перетащите файл резервной копии .db на этот файл.
+echo Drag a backup .db file onto this command file to restore it.
 pause

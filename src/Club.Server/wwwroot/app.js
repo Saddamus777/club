@@ -63,11 +63,30 @@ async function start() {
   try {
     const setup = await security();
     if (!setup.ownerExists) {
-      root.innerHTML = '<div class="auth panel"><h1>Первый запуск</h1><p>Создайте аккаунт владельца через <strong>01-create-owner.cmd</strong> из комплекта для Windows. Пароль выбираете вы.</p><p class="muted">Для разработчика: запустите сервер с аргументом <code>--create-owner</code>.</p></div>';
+      renderOwnerSetup();
       return;
     }
     await refresh(true);
   } catch (error) { root.innerHTML = `<p class="warning">${esc(error.message)} Обновите страницу после запуска сервера.</p>`; }
+}
+function renderOwnerSetup() {
+  state=null;identity.innerHTML='';showPending();
+  root.innerHTML='<section class="auth panel"><h1>Создание владельца</h1><p class="muted">Первый запуск. Создайте свой аккаунт для управления клубом. В дальнейшем сотрудники получают отдельные аккаунты.</p><form id="owner-setup"><label>Логин<input name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_.\\-]+"></label><label>Пароль<input name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="128"></label><label>Повторите пароль<input name="confirmPassword" type="password" autocomplete="new-password" required minlength="10" maxlength="128"></label><button>Создать владельца и войти</button></form><p class="muted">Логин: 3–32 латинские буквы, цифры, точка, дефис или подчёркивание. Пароль: от 10 символов.</p></section>';
+  document.querySelector('#owner-setup').onsubmit=async event=>{
+    event.preventDefault();const form=event.target,button=form.querySelector('button');button.disabled=true;
+    const payload=Object.fromEntries(new FormData(form));
+    try {
+      if(payload.password!==payload.confirmPassword)throw new Error('Пароли не совпадают.');
+      await api('/setup/owner',payload);
+      await api('/login',{username:payload.username,password:payload.password});
+      await security();tab='overview';await refresh(true);
+    } catch(error) {
+      // An interrupted response may have followed a successful creation: never offer to overwrite it.
+      const setup=await security().catch(()=>null);
+      if(setup?.ownerExists){renderAuth();toast('Аккаунт владельца уже создан. Войдите с выбранным логином и паролем.');}
+      else {toast(error.message,true);button.disabled=false;}
+    }
+  };
 }
 function renderAuth(register = false) {
   state = null; identity.innerHTML = '';showPending();

@@ -51,7 +51,6 @@ async function waitFor(predicate, message) {
   try {
     try {await fetch('http://127.0.0.1:5080/health');throw new Error('Port 5080 is already used; stop your development server before running this check.');}
     catch(e){if(!e.message.includes('fetch failed'))throw e;}
-    runCommand(['--create-owner'],`owner\n${password}\n${password}\n`);
     await boot();
     let launch = {headless:true};
     if(process.env.CLUB_PACKAGED_CHROMIUM==='1') {
@@ -67,7 +66,18 @@ async function waitFor(predicate, message) {
     for(const page of [admin,visitor])page.on('pageerror',e=>errors.push(e.message));
     admin.on('dialog',dialog=>dialog.accept('Проверка прототипа'));
     visitor.on('dialog',dialog=>dialog.accept());
-    await login(admin,'owner');
+    await admin.goto('http://127.0.0.1:5080');
+    await admin.locator('#owner-setup input[name=username]').fill('owner');
+    await admin.locator('#owner-setup input[name=password]').fill(password);
+    await admin.locator('#owner-setup input[name=confirmPassword]').fill('different-password');
+    await admin.locator('#owner-setup button').click();
+    await waitFor(()=>admin.locator('#owner-setup button').isEnabled(),'Setup validation did not release form.');
+    assert.equal(await admin.evaluate(()=>fetch('/api/security').then(r=>r.json()).then(x=>x.ownerExists)),false);
+    await admin.locator('#owner-setup input[name=confirmPassword]').fill(password);
+    await admin.locator('#owner-setup button').click();
+    await admin.locator('#logout').waitFor();
+    await admin.reload();
+    await admin.locator('#logout').waitFor();
     await admin.locator('#computer input').fill('ПК-01');
     await admin.locator('#computer button').click();
     await admin.locator('.computer').waitFor();
@@ -130,7 +140,7 @@ async function waitFor(predicate, message) {
     assert.equal(await admin.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,'Mobile page must not overflow horizontally.');
     await admin.screenshot({path:path.join(root,'artifacts','admin-mobile.png'),fullPage:true});
     assert.deepEqual(errors,[]);
-    console.log('PASS: browser registration, login, package setup, lost-response retry, purchase, pause/resume, real server restart, manual refund, report and downloaded backup. No page errors.');
+    console.log('PASS: first-run owner setup without CLI, password confirmation, reload, browser registration, login, package setup, lost-response retry, purchase, pause/resume, real server restart, manual refund, report and downloaded backup. No page errors.');
   } catch(error) {
     if(browser) {
       fs.mkdirSync(path.join(root,'artifacts'),{recursive:true});

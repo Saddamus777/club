@@ -2,6 +2,7 @@ namespace Club.Server;
 
 public sealed record Account(string Id, string Username, string Role, string PasswordHash, long BalanceMinor);
 public sealed record RegisterRequest(string Username, string Password);
+public sealed record OwnerSetupRequest(string Username, string Password, string ConfirmPassword);
 public sealed record ComputerRequest(string Name, string OperationId);
 public sealed record PackageRequest(string? Id, string Name, int Minutes, long PriceMinor, bool Active, string OperationId);
 public sealed record TopUpRequest(string CustomerId, long AmountMinor, string Method, string OperationId);
