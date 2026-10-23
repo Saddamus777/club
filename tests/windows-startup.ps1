@@ -49,7 +49,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Empty catalog was rejected.' }
     '[{"id":"bad","name":"Bad","executable":"relative.exe","arguments":[]}]' | Set-Content -LiteralPath $temp -Encoding UTF8
     & $agentExe --validate-games $temp 2>$null
-    if ($LASTEXITCODE -eq 0) { throw 'Relative executable path was accepted.' }
+    if ($LASTEXITCODE -ne 1) { throw 'Invalid catalog did not return the expected controlled failure.' }
+    # GitHub's PowerShell wrapper propagates the last native exit code. This failure was expected.
+    $global:LASTEXITCODE = 0
     Write-Host 'PASS: limited visitor startup registration/removal/collision and catalog validation. No interactive logon or game execution was tested.'
 } finally {
     if ($registered) { Remove-ClubVisitorStartup -VisitorSid $user.SID.Value -Executable $visitorExe }
