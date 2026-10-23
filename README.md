@@ -36,6 +36,12 @@ LAN включается явно: конкретный IP, HTTPS, сертиф�
 [Пошаговая инструкция Windows/LAN](docs/windows-pilot.md) ·
 [Требования и этапы](docs/specification.md) · [Фактические проверки](docs/validation.md).
 
+[Скачать тестовый комплект 0.2 для Windows x64](https://github.com/Saddamus777/club/actions/runs/40007927963/artifacts/12524473479)
+(нужен вход в GitHub; артефакт хранится до 7 ноября 2026, 01:02 Asia/Bishkek).
+[Успешный Windows/Linux прогон](https://github.com/Saddamus777/club/actions/runs/40007927963):
+41 тест, сборка и запуск двух окон на Windows Server 2025. Windows 11/служба/игры
+на реальном ПК этим прогоном не подтверждены.
+
 Комплект `club-pilot-0.2-win-x64` собирает workflow **Validate club pilot** в GitHub
 Actions, если Windows job завершился успешно. Внутри отдельные папки Admin, Server,
 Visitor, Agent и Setup. Runtime включён. Статус Actions надо проверять для нужного
