@@ -16,6 +16,7 @@ namespace Club.Tests;
 
 public sealed class ApiFactory(bool loopback = true) : WebApplicationFactory<Program>
 {
+    private ClubStore? testStore;
     public string DirectoryPath { get; } = Path.Combine(Path.GetTempPath(), "club-api-" + Guid.NewGuid().ToString("N"));
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -25,14 +26,17 @@ public sealed class ApiFactory(bool loopback = true) : WebApplicationFactory<Pro
             services.RemoveAll<ClubStore>();
             var worker = services.FirstOrDefault(x => x.ServiceType == typeof(IHostedService) && x.ImplementationType == typeof(SessionWorker));
             if (worker is not null) services.Remove(worker);
-            services.AddSingleton(sp => new ClubStore(DirectoryPath, TimeProvider.System, sp.GetRequiredService<IPasswordHasher<Account>>()));
+            services.AddSingleton(sp => testStore = new ClubStore(DirectoryPath, TimeProvider.System, sp.GetRequiredService<IPasswordHasher<Account>>()));
             services.AddDataProtection().PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(DirectoryPath, "keys")));
         });
     }
-    protected override void Dispose(bool disposing)
+    public override async ValueTask DisposeAsync()
     {
-        base.Dispose(disposing);
-        if (disposing && Directory.Exists(DirectoryPath)) Directory.Delete(DirectoryPath, true);
+        // Base synchronous disposal calls DisposeAsync and re-enters Dispose(bool).
+        // Cleanup belongs after the entire asynchronous host shutdown, not in that re-entry.
+        await base.DisposeAsync();
+        testStore?.Dispose();
+        if (Directory.Exists(DirectoryPath)) Directory.Delete(DirectoryPath, true);
     }
 }
 
