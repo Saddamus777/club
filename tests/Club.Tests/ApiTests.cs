@@ -34,7 +34,7 @@ public sealed class ApiFactory(bool loopback = true) : WebApplicationFactory<Pro
     {
         // Base synchronous disposal calls DisposeAsync and re-enters Dispose(bool).
         // Cleanup belongs after the entire asynchronous host shutdown, not in that re-entry.
-        await base.DisposeAsync();
+        await base.DisposeAsync().ConfigureAwait(false);
         testStore?.Dispose();
         if (Directory.Exists(DirectoryPath)) Directory.Delete(DirectoryPath, true);
     }
@@ -75,7 +75,7 @@ public sealed class ApiTests
     [Fact]
     public async Task FirstRunOwnerCanBeCreatedLocallyAndCannotBeOverwritten()
     {
-        using var factory = new ApiFactory();
+        await using var factory = new ApiFactory();
         using var client = factory.CreateClient();
         await Token(client);
         var request = new OwnerSetupRequest("owner", Password, Password);
@@ -92,7 +92,7 @@ public sealed class ApiTests
     [Fact]
     public async Task OwnerSetupRequiresCsrfAndMatchingPasswords()
     {
-        using var factory = new ApiFactory();
+        await using var factory = new ApiFactory();
         using var client = factory.CreateClient();
         var request = new OwnerSetupRequest("owner", Password, Password);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/setup/owner", request)).StatusCode);
@@ -104,7 +104,7 @@ public sealed class ApiTests
     [Fact]
     public async Task OwnerSetupRejectsNonLoopbackRequests()
     {
-        using var factory = new ApiFactory(loopback: false);
+        await using var factory = new ApiFactory(loopback: false);
         using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
         await Token(client);
         var response = await client.PostAsJsonAsync("/api/setup/owner", new OwnerSetupRequest("owner", Password, Password));
@@ -115,7 +115,7 @@ public sealed class ApiTests
     [Fact]
     public async Task ConcurrentFirstRunRequestsCreateOnlyOneOwner()
     {
-        using var factory = new ApiFactory();
+        await using var factory = new ApiFactory();
         using var first = factory.CreateClient();
         using var second = factory.CreateClient();
         await Token(first); await Token(second);
@@ -129,7 +129,7 @@ public sealed class ApiTests
     [Fact]
     public async Task HttpWorkflowProtectsMoneyAndProvidesVerifiedBackup()
     {
-        using var factory = new ApiFactory();
+        await using var factory = new ApiFactory();
         using var admin = factory.CreateClient();
         using var visitor = factory.CreateClient();
         factory.Services.GetRequiredService<ClubStore>().CreateAccount("owner",Password,"Owner");
@@ -166,7 +166,7 @@ public sealed class ApiTests
     [Fact]
     public async Task MutationsRequireCsrfTokenAndAuthentication()
     {
-        using var factory = new ApiFactory();
+        await using var factory = new ApiFactory();
         using var client = factory.CreateClient();
         factory.Services.GetRequiredService<ClubStore>().CreateAccount("owner",Password,"Owner");
         Assert.Equal(HttpStatusCode.Unauthorized,(await client.GetAsync("/api/state")).StatusCode);
@@ -183,7 +183,7 @@ public sealed class ApiTests
     [Fact]
     public async Task LoginErrorsAndRateLimitDoNotLeakAccounts()
     {
-        using var factory = new ApiFactory();
+        await using var factory = new ApiFactory();
         using var client = factory.CreateClient();
         factory.Services.GetRequiredService<ClubStore>().CreateAccount("owner",Password,"Owner");
         await Token(client);

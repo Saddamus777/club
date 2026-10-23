@@ -15,7 +15,7 @@ public sealed class LanApiTests
     [Fact]
     public async Task HeartbeatRequiresTlsAndDeviceCredentialButNotBrowserCookieOrCsrf()
     {
-        using var factory = new ApiFactory();
+        await using var factory = new ApiFactory();
         var store = factory.Services.GetRequiredService<ClubStore>();
         var owner = store.CreateAccount("owner", "test-password-12345", "Owner");
         var pc = store.AddComputer(owner.Id, new("LAN PC", Guid.NewGuid().ToString())).GetProperty("id").GetString()!;
@@ -36,7 +36,7 @@ public sealed class LanApiTests
     [Fact]
     public async Task LanRejectsPlaintextStaffLoginAndStaffEndpoints()
     {
-        using var factory = new ApiFactory(loopback: false);
+        await using var factory = new ApiFactory(loopback: false);
         var store = factory.Services.GetRequiredService<ClubStore>();
         store.CreateAccount("owner", "test-password-12345", "Owner");
         using var plain = factory.CreateClient();
