@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+**/node_modules/
+**/.data/
+artifacts/
+TestResults/
+.env
+.DS_Store
+*.user
+*.suo
