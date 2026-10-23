@@ -8,3 +8,9 @@ TestResults/
 .DS_Store
 *.user
 *.suo
+work/
+*.pfx
+agent.json
+*.binding.json
+appsettings.Production.json
+*.cer

@@ -1,0 +1,52 @@
+name: Validate club pilot
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet restore Club.slnx --locked-mode
+      - run: dotnet build Club.slnx -c Release --no-restore
+      - run: dotnet test tests/Club.Tests -c Release --no-build --logger "trx;LogFileName=tests.trx"
+      - name: Publish Windows pilot
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($project in @('Server','Admin','Visitor','Agent')) {
+            dotnet publish "src/Club.$project" -c Release -r win-x64 --self-contained true -p:RestoreLockedMode=true -o "artifacts/pilot/$project"
+            if ($LASTEXITCODE -ne 0) { throw "Publish failed: $project" }
+          }
+          Copy-Item scripts/pilot artifacts/pilot/Setup -Recurse
+          Copy-Item docs/windows-pilot.md artifacts/pilot/READ-ME.md
+      - name: Start both native Windows windows (no service installation)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($app in @('Admin','Visitor')) {
+            $process = Start-Process "artifacts/pilot/$app/Club.$app.exe" -ArgumentList '--smoke-test' -PassThru
+            if (-not $process.WaitForExit(30000)) { $process.Kill(); throw "$app window did not finish smoke test" }
+            if ($process.ExitCode -ne 0) { throw "$app failed: $($process.ExitCode)" }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-${{ matrix.os }}
+          path: tests/Club.Tests/TestResults/*.trx
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && success()
+        with:
+          name: club-pilot-0.2-win-x64
+          path: artifacts/pilot/
+          retention-days: 14

@@ -101,7 +101,7 @@ public sealed class ApiTests
     public async Task OwnerSetupRejectsNonLoopbackRequests()
     {
         using var factory = new ApiFactory(loopback: false);
-        using var client = factory.CreateClient();
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
         await Token(client);
         var response = await client.PostAsJsonAsync("/api/setup/owner", new OwnerSetupRequest("owner", Password, Password));
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);

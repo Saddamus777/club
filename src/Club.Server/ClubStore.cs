@@ -8,7 +8,7 @@ using static Club.Server.Database;
 
 namespace Club.Server;
 
-public sealed class ClubStore : IDisposable
+public sealed partial class ClubStore : IDisposable
 {
     private readonly object gate = new();
     private readonly string path;
@@ -32,7 +32,7 @@ public sealed class ClubStore : IDisposable
         Initialize(db);
         using var tx = db.BeginTransaction();
         var interrupted = Rows(db, tx, "SELECT Id AS id FROM Sessions WHERE Status='Running'");
-        Execute(db, tx, "UPDATE Sessions SET Status='Paused' WHERE Status='Running'");
+        Execute(db, tx, "UPDATE Sessions SET Status='Paused',Revision=Revision+Managed WHERE Status='Running'");
         foreach (var session in interrupted) Audit(db, tx, null, "RecoveryPause", (string)session["id"]!, "Перезапуск сервера; сохранён последний подтверждённый остаток.");
         tx.Commit();
     }
@@ -130,8 +130,10 @@ public sealed class ClubStore : IDisposable
         return new { balanceMinor = customer.BalanceMinor + request.AmountMinor };
     });
 
-    public JsonElement Purchase(string actor, PurchaseRequest request) => Mutate(actor, "Purchase", request.OperationId, request, (db, tx) =>
+    public JsonElement Purchase(string actor, PurchaseRequest request, string? deviceHeader = null) => Mutate(actor, "Purchase", request.OperationId, request, (db, tx) =>
     {
+        if (Number(db, tx, "SELECT COUNT(*) FROM Devices WHERE ComputerId=$0", request.ComputerId) > 0)
+            RequireDevice(db, tx, deviceHeader, request.ComputerId);
         var customer = RequireCustomer(db, tx, actor);
         var packages = Rows(db, tx, "SELECT Name AS name, Minutes AS minutes, PriceMinor AS price FROM Packages WHERE Id=$0 AND Active=1", request.PackageId);
         if (packages.Count == 0) throw new RuleException("Пакет недоступен.", 404);
@@ -158,10 +160,12 @@ public sealed class ClubStore : IDisposable
     private string Start(SqliteConnection db, SqliteTransaction tx, string actor, string customer, string computer, string package, long minutes, long price)
     {
         if (Number(db, tx, "SELECT COUNT(*) FROM Computers WHERE Id=$0", computer) == 0) throw new RuleException("Место не найдено.", 404);
-        if (Number(db, tx, "SELECT COUNT(*) FROM Sessions WHERE (ComputerId=$0 OR CustomerId=$1) AND Status IN ('Running','Paused')", computer, customer) > 0)
+        RequireAvailableDevice(db, tx, computer);
+        if (Number(db, tx, "SELECT COUNT(*) FROM Sessions WHERE (ComputerId=$0 OR CustomerId=$1) AND (Status IN ('Running','Paused') OR (Managed=1 AND AckRevision<Revision))", computer, customer) > 0)
             throw new RuleException("У посетителя или места уже есть незавершённый сеанс.", 409);
         var id = Guid.NewGuid().ToString("N");
-        Execute(db, tx, "INSERT INTO Sessions VALUES($0,$1,$2,$3,$4,$5,$5,'Running',$6,$6)", id, customer, computer, package, price, minutes * 60_000, Now);
+        Execute(db, tx, "INSERT INTO Sessions(Id,CustomerId,ComputerId,PackageName,PriceMinor,TotalMs,RemainingMs,Status,LastTickMs,CreatedMs) VALUES($0,$1,$2,$3,$4,$5,$5,'Running',$6,$6)", id, customer, computer, package, price, minutes * 60_000, Now);
+        Execute(db, tx, "UPDATE Sessions SET Managed=1 WHERE Id=$0 AND EXISTS(SELECT 1 FROM Devices WHERE ComputerId=$1)", id, computer);
         Audit(db, tx, actor, "SessionStarted", id, $"{package}; {minutes} мин; {price} тыйын");
         return id;
     }
@@ -171,6 +175,9 @@ public sealed class ClubStore : IDisposable
         RequireStaff(db, tx, actor);
         var reason = Text(request.Reason, 500);
         var session = GetSession(db, tx, id);
+        if (Number(db, tx, "SELECT COUNT(*) FROM Sessions WHERE Id=$0 AND Managed=1 AND AckRevision<Revision", id) > 0)
+            throw new RuleException("Дождитесь подтверждения предыдущей команды игровым ПК.", 409);
+        if (action == "resume") RequireAvailableDevice(db, tx, session.ComputerId);
         var next = action switch
         {
             "pause" when session.Status == "Running" => "Paused",
@@ -178,7 +185,7 @@ public sealed class ClubStore : IDisposable
             "end" when session.Status is "Running" or "Paused" => "Ended",
             _ => throw new RuleException("Действие недоступно для текущего состояния сеанса.", 409)
         };
-        Execute(db, tx, "UPDATE Sessions SET Status=$1,LastTickMs=$2 WHERE Id=$0", id, next, Now);
+        Execute(db, tx, "UPDATE Sessions SET Status=$1,LastTickMs=$2,Revision=Revision+Managed WHERE Id=$0", id, next, Now);
         Audit(db, tx, actor, "Session:" + action, id, reason);
         return new { sessionId = id, status = next, remainingMs = session.RemainingMs };
     });
@@ -191,6 +198,8 @@ public sealed class ClubStore : IDisposable
         var reason = Text(request.Reason, 500);
         var session = GetSession(db, tx, request.SessionId);
         if (session.Status != "Ended") throw new RuleException("Сначала завершите сеанс. Возврат доступен для неиспользованного остатка.", 409);
+        if (Number(db, tx, "SELECT COUNT(*) FROM Sessions WHERE Id=$0 AND Managed=1 AND AckRevision<Revision", session.Id) > 0)
+            throw new RuleException("Игровой ПК ещё не подтвердил завершение. Возврат пока недоступен.", 409);
         var refunded = Number(db, tx, "SELECT COALESCE(SUM(AmountMinor),0) FROM Ledger WHERE Kind='Refund' AND SessionId=$0", session.Id);
         // Exact proportional cap in integer minor units; round down, never create extra money.
         var limit = session.PriceMinor * session.RemainingMs / session.TotalMs - refunded;
@@ -213,7 +222,7 @@ public sealed class ClubStore : IDisposable
 
     private void Advance(SqliteConnection db, SqliteTransaction tx)
     {
-        var sessions = ReadSessions(db, tx, "WHERE Status='Running'");
+        var sessions = ReadSessions(db, tx, "WHERE Status='Running' AND Managed=0");
         foreach (var session in sessions)
         {
             var elapsed = Now - session.LastTickMs;
@@ -243,17 +252,19 @@ public sealed class ClubStore : IDisposable
             var sessions = Rows(db, tx, """
                 SELECT s.Id AS id,s.CustomerId AS customerId,a.Username AS username,s.ComputerId AS computerId,c.Name AS computerName,
                   s.PackageName AS packageName,s.PriceMinor AS priceMinor,s.TotalMs AS totalMs,s.RemainingMs AS remainingMs,
-                  s.Status AS status,s.CreatedMs AS createdMs,
-                  CASE WHEN s.Status='Ended' THEN s.PriceMinor*s.RemainingMs/s.TotalMs -
+                  s.Status AS status,s.CreatedMs AS createdMs,s.Managed AS managed,s.Revision AS revision,s.AckRevision AS ackRevision,
+                  CASE WHEN s.Status='Ended' AND (s.Managed=0 OR s.AckRevision=s.Revision) THEN s.PriceMinor*s.RemainingMs/s.TotalMs -
                     COALESCE((SELECT SUM(l.AmountMinor) FROM Ledger l WHERE l.SessionId=s.Id AND l.Kind='Refund'),0)
                     ELSE 0 END AS availableRefundMinor
                 FROM Sessions s JOIN Accounts a ON a.Id=s.CustomerId JOIN Computers c ON c.Id=s.ComputerId
-                WHERE (s.Status IN ('Running','Paused') OR s.Id IN (
+                WHERE (s.Status IN ('Running','Paused') OR (s.Managed=1 AND s.AckRevision<s.Revision) OR s.Id IN (
                   SELECT Id FROM Sessions WHERE Status IN ('Ended','Completed') ORDER BY CreatedMs DESC LIMIT 100))
                 """ + (staff ? "" : " AND s.CustomerId=$0") + " ORDER BY s.CreatedMs DESC", staff ? [] : [actor]);
             var computers = Rows(db, tx, """
                 SELECT c.Id AS id,c.Name AS name,CASE WHEN EXISTS(SELECT 1 FROM Sessions s WHERE s.ComputerId=c.Id
-                  AND s.Status IN ('Running','Paused')) THEN 1 ELSE 0 END AS occupied FROM Computers c ORDER BY c.Name
+                  AND (s.Status IN ('Running','Paused') OR (s.Managed=1 AND s.AckRevision<s.Revision))) THEN 1 ELSE 0 END AS occupied,
+                  CASE WHEN d.ComputerId IS NULL THEN 0 ELSE 1 END AS managed,
+                  COALESCE(d.LastSeenMs,0) AS lastSeenMs FROM Computers c LEFT JOIN Devices d ON d.ComputerId=c.Id ORDER BY c.Name
                 """);
             var packages = Rows(db, tx, "SELECT Id AS id,Name AS name,Minutes AS minutes,PriceMinor AS priceMinor,Active AS active FROM Packages" + (staff ? "" : " WHERE Active=1") + " ORDER BY Minutes,Name");
             var customers = staff ? Rows(db, tx, "SELECT Id AS id,Username AS username,BalanceMinor AS balanceMinor FROM Accounts WHERE Role='Customer' ORDER BY Username") : [];
