@@ -50,6 +50,11 @@ jobs:
             if ($process.ExitCode -ne 0) { throw "$app failed: $($process.ExitCode)" }
           }
       - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows' && success()
+        with:
+          name: native-window-themes
+          path: artifacts/ui/*.png
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: validation-${{ matrix.os }}

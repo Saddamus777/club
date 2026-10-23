@@ -79,6 +79,9 @@ internal sealed class MainWindow : Form
     private static readonly bool Staff = false;
 #endif
     private readonly Transport transport = new();
+    private readonly Button themeButton = new() { AutoSize = true, Margin = new Padding(4) };
+    private readonly string themeFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Club", Staff ? "admin-theme.txt" : "visitor-theme.txt");
+    private bool darkTheme = true;
     private readonly Label status = new() { AutoSize = true, MaximumSize = new Size(1000, 0), Padding = new Padding(12) };
     private readonly TabControl tabs = new() { Dock = DockStyle.Fill };
     private readonly FlowLayoutPanel actions = new() { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(10), WrapContents = true };
@@ -94,12 +97,31 @@ internal sealed class MainWindow : Form
     public MainWindow(bool smoke)
     {
         this.smoke = smoke;
+        try { darkTheme = !File.Exists(themeFile) || File.ReadAllText(themeFile).Trim() != "light"; }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
         Text = Staff ? "Клуб — администратор · 0.2 pilot" : "Клуб — посетитель · 0.2 pilot";
         Size = new Size(1120, 760); MinimumSize = new Size(780, 540); StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 11);
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 100, AutoScroll = true };
         bottom.Controls.Add(status);
         Controls.Add(tabs); Controls.Add(actions); Controls.Add(bottom);
+        themeButton.Click += (_, _) =>
+        {
+            darkTheme = !darkTheme;
+            ApplyTheme();
+            if (smoke) return; // Smoke mode never overwrites a real user's preference.
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(themeFile)!);
+                File.WriteAllText(themeFile, darkTheme ? "dark" : "light");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { status.Text = "Фон изменён. Сохранить выбор не удалось: " + ex.Message; }
+        };
+        actions.Controls.Add(themeButton);
+        tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
+        tabs.DrawItem += (_, e) => DesktopTheme.DrawTab(tabs, e, darkTheme);
         Button("Войти", Login);
         Button(Staff ? "Создать владельца" : "Регистрация", Register);
         Button("Обновить", RefreshState);
@@ -123,12 +145,25 @@ internal sealed class MainWindow : Form
             reportPage.Controls.Add(new TextBox { Name = "report", Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both });
             tabs.TabPages.Add(reportPage);
         }
+        ApplyTheme();
         Shown += async (_, _) =>
         {
             if (smoke)
             {
                 var timer = new System.Windows.Forms.Timer { Interval = 500 };
-                timer.Tick += (_, _) => { timer.Stop(); timer.Dispose(); Close(); };
+                var original = darkTheme;
+                darkTheme = true; ApplyTheme();
+                timer.Tick += (_, _) =>
+                {
+                    var output = Path.Combine(Environment.CurrentDirectory, "artifacts", "ui");
+                    Directory.CreateDirectory(output);
+                    using var image = new Bitmap(Width, Height);
+                    DrawToBitmap(image, new Rectangle(Point.Empty, Size));
+                    image.Save(Path.Combine(output, $"{(Staff ? "Admin" : "Visitor")}-{(darkTheme ? "dark" : "light")}.png"));
+                    if (darkTheme) { themeButton.PerformClick(); return; }
+                    darkTheme = original;
+                    timer.Stop(); timer.Dispose(); Close();
+                };
                 timer.Start(); return;
             }
 #if ADMIN
@@ -166,6 +201,12 @@ internal sealed class MainWindow : Form
         }
     }
 #endif
+    private void ApplyTheme()
+    {
+        DesktopTheme.Apply(this, darkTheme);
+        themeButton.Text = darkTheme ? "Светлый фон" : "Чёрный фон";
+        tabs.Invalidate();
+    }
     private void Button(string title, Func<Task> action)
     {
         var button = new Button { Text = title, AutoSize = true, Margin = new Padding(4) };
@@ -316,6 +357,7 @@ internal sealed class MainWindow : Form
         }
         var ok = new Button { Text = "Подтвердить", DialogResult = DialogResult.OK, Left = 300, Top = 20 + labels.Length * 70, Width = 165 };
         dialog.Controls.Add(ok); dialog.AcceptButton = ok;
+        DesktopTheme.Apply(dialog, darkTheme);
         return dialog.ShowDialog(this) == DialogResult.OK ? entries.Select(x => x.Text.Trim()).ToArray() : null;
     }
     private sealed record Pending(string UserId, string Path, string Json);
@@ -324,4 +366,55 @@ internal sealed class MainWindow : Form
 internal static class GridExtensions
 {
     public static void SetVisible(this DataGridViewColumn column, bool visible) => column.Visible = visible;
+}
+
+internal static class DesktopTheme
+{
+    public static void Apply(Control control, bool dark)
+    {
+        var background = dark ? Color.Black : SystemColors.Control;
+        var surface = dark ? Color.FromArgb(20, 20, 20) : SystemColors.Window;
+        var text = dark ? Color.FromArgb(230, 230, 230) : SystemColors.ControlText;
+        var border = dark ? Color.FromArgb(65, 65, 65) : SystemColors.ControlDark;
+        control.BackColor = background;
+        control.ForeColor = text;
+        if (control is TextBoxBase or ComboBox) control.BackColor = surface;
+        if (control is Button button)
+        {
+            button.UseVisualStyleBackColor = false;
+            button.BackColor = dark ? Color.FromArgb(30, 30, 30) : SystemColors.ControlLight;
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderColor = border;
+            button.FlatAppearance.MouseOverBackColor = dark ? Color.FromArgb(50, 50, 50) : SystemColors.ControlLightLight;
+            button.FlatAppearance.MouseDownBackColor = dark ? Color.FromArgb(65, 65, 65) : SystemColors.ControlDark;
+        }
+        if (control is DataGridView grid)
+        {
+            grid.BackgroundColor = background;
+            grid.GridColor = border;
+            grid.EnableHeadersVisualStyles = false;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = dark ? Color.FromArgb(30, 30, 30) : SystemColors.Control;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = text;
+            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = grid.ColumnHeadersDefaultCellStyle.BackColor;
+            grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = text;
+            grid.DefaultCellStyle.BackColor = surface;
+            grid.DefaultCellStyle.ForeColor = text;
+            grid.DefaultCellStyle.SelectionBackColor = dark ? Color.FromArgb(35, 74, 60) : SystemColors.Highlight;
+            grid.DefaultCellStyle.SelectionForeColor = dark ? text : SystemColors.HighlightText;
+            grid.AlternatingRowsDefaultCellStyle.BackColor = dark ? Color.FromArgb(27, 27, 27) : SystemColors.ControlLightLight;
+        }
+        foreach (Control child in control.Controls) Apply(child, dark);
+    }
+    public static void DrawTab(TabControl tabs, DrawItemEventArgs e, bool dark)
+    {
+        if (e.Index < 0) return;
+        var selected = e.Index == tabs.SelectedIndex;
+        var background = dark ? (selected ? Color.FromArgb(35, 74, 60) : Color.FromArgb(24, 24, 24))
+            : (selected ? SystemColors.Window : SystemColors.Control);
+        using var brush = new SolidBrush(background);
+        e.Graphics.FillRectangle(brush, e.Bounds);
+        TextRenderer.DrawText(e.Graphics, tabs.TabPages[e.Index].Text, tabs.Font, e.Bounds,
+            dark ? Color.FromArgb(230, 230, 230) : SystemColors.ControlText,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+    }
 }
