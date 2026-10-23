@@ -17,8 +17,12 @@ try {
     Register-ClubVisitorStartup -VisitorSid $user.SID.Value -Executable $visitorExe
     $registered = $true
     [xml]$xml = Export-ScheduledTask -TaskName 'ClubVisitor' -TaskPath '\'
-    $principal = $xml.Task.Principals.Principal
-    if ((Resolve-AccountSid $principal.UserId) -ne $user.SID.Value -or $principal.RunLevel -ne 'LeastPrivilege' -or $principal.LogonType -ne 'InteractiveToken') {
+    # XML omits default RunLevel. Read the actual Task Scheduler definition instead.
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    $scheduler.Connect()
+    $principal = $scheduler.GetFolder('\').GetTask('ClubVisitor').Definition.Principal
+    # TASK_RUNLEVEL_LUA = 0; TASK_LOGON_INTERACTIVE_TOKEN = 3.
+    if ((Resolve-AccountSid $principal.UserId) -ne $user.SID.Value -or $principal.RunLevel -ne 0 -or $principal.LogonType -ne 3) {
         throw "Incorrect startup principal: user=$($principal.UserId), level=$($principal.RunLevel), logon=$($principal.LogonType)"
     }
     if ((Resolve-AccountSid $xml.Task.Triggers.LogonTrigger.UserId) -ne $user.SID.Value -or $xml.Task.Actions.Exec.Command -ne $visitorExe) {
@@ -34,6 +38,7 @@ try {
     Remove-ClubVisitorStartup -VisitorSid $user.SID.Value -Executable $visitorExe
     $registered = $false
     if (Get-ScheduledTask -TaskName 'ClubVisitor' -TaskPath '\' -ErrorAction SilentlyContinue) { throw 'Task removal failed.' }
+    Write-Host 'PASS: Task Scheduler confirmed the exact visitor SID, limited rights, interactive logon and safe removal.'
     # Exercise the published agent's real JSON reader and validation CLI, including PS 5.1 UTF-8 BOM.
     ConvertTo-Json -InputObject @(@{ id = 'sample'; name = 'Sample'; executable = $visitorExe; arguments = @('two words') }) -Depth 4 |
         Set-Content -LiteralPath $temp -Encoding UTF8
