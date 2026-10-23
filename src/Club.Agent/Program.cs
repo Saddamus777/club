@@ -15,7 +15,7 @@ if (args.Length == 2 && args[0] == "--validate-games")
         }
         Console.WriteLine("Catalog validated: " + catalog.List().Length);
     }
-    catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+    catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException or UnauthorizedAccessException)
     { Console.WriteLine("Catalog rejected: " + ex.Message); Environment.ExitCode = 1; }
     return;
 }
