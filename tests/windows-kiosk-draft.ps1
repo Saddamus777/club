@@ -12,6 +12,8 @@ try {
     ) }
     $inputFile = Join-Path $work 'request.json'
     $outputFile = Join-Path $work 'draft.xml'
+    & $agentExe --export-kiosk-draft $inputFile
+    if ($LASTEXITCODE -ne 1) { throw 'Incomplete maintenance command was not rejected before service startup.' }
     $request | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $inputFile -Encoding UTF8
     & $agentExe --export-kiosk-draft $inputFile $outputFile
     if ($LASTEXITCODE -ne 0) { throw 'Draft CLI failed with a valid request (PS 5.1 BOM).' }

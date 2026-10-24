@@ -42,6 +42,14 @@ if (args.Length == 2 && args[0] == "--validate-games")
     return;
 }
 
+// A mistyped maintenance command must not start a second session-enforcement worker.
+if (args.Length != 0)
+{
+    Console.WriteLine("Usage: Club.Agent (service), --validate-games FILE, or --export-kiosk-draft REQUEST OUTPUT.");
+    Environment.ExitCode = 1;
+    return;
+}
+
 var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Club", "Agent");
 var config = JsonSerializer.Deserialize<AgentConfiguration>(File.ReadAllText(Path.Combine(root, "agent.json")), ApiClient.Json)
     ?? throw new InvalidDataException("Отсутствует конфигурация службы.");
