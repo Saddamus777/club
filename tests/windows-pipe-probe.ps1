@@ -70,6 +70,18 @@ try {
         $response = Request $pipe '/local/status'
         if ($response.status -ne 200) { throw 'Local status failed.' }
         $status = $response.json | ConvertFrom-Json
+        if ($Mode -eq 'Running') {
+            # TCP failure detection depends on the in-flight HTTP timeout, not a fixed sleep.
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while ($status.connected -and [DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 250
+                $status = (Request $pipe '/local/status').json | ConvertFrom-Json
+            }
+            $remaining = $status.grant.remainingMs
+            Start-Sleep -Seconds 1
+            $status = (Request $pipe '/local/status').json | ConvertFrom-Json
+            if ($status.grant.remainingMs -ge $remaining) { throw 'Offline timer did not advance.' }
+        }
         $expected = $Mode
         if ($Mode -in @('Malformed','BadCatalog')) { $expected = 'Idle' }
         if ($status.grant.state -ne $expected) { throw "Expected $expected, got $($status.grant.state)." }
@@ -81,7 +93,9 @@ try {
             if ($catalog.status -ne 200 -or $games.Count -ne 1 -or $games[0].id -ne 'sample') { throw 'Wrong protected catalog.' }
             $launch = Request $pipe '/local/games/launch' @{ id = 'sample'; executable = 'C:\ignored.exe' }
             if ($Mode -eq 'Running') {
-                if ($launch.status -ne 200 -or $status.connected -or $status.grant.remainingMs -le 0) { throw 'Offline running grant was not usable.' }
+                if ($launch.status -ne 200 -or $status.connected -or $status.grant.remainingMs -le 0) {
+                    throw "Offline grant failed: launch=$($launch.status), connected=$($status.connected), remaining=$($status.grant.remainingMs)."
+                }
                 $approved = $launch.json | ConvertFrom-Json
                 if ($approved.game.executable -ne (Join-Path $env:ProgramFiles 'Club\Visitor\Club.Visitor.exe')) { throw 'Visitor supplied executable was used.' }
             } elseif ($launch.status -ne 409) { throw 'Launch permitted without a running grant.' }

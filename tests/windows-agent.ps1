@@ -127,7 +127,6 @@ try {
     Set-Grant 'Running' 1 60000
     Wait-Until { (Read-Json (Join-Path $work 'report.json')).state -eq 'Running' } 'Running grant was not applied.'
     Stop-FixtureServer
-    Start-Sleep -Seconds 3
     Probe $visitorCredential 'Running'
     $before = Read-Json (Join-Path $data 'session.json')
     Restart-Service ClubAgent
