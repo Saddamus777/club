@@ -56,6 +56,11 @@ jobs:
             if (-not $process.WaitForExit(30000)) { $process.Kill(); throw "$app window did not finish smoke test" }
             if ($process.ExitCode -ne 0) { throw "$app failed: $($process.ExitCode)" }
           }
+      - name: Install agent and verify real Windows service and visitor pipe
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: powershell
+        run: ./tests/windows-agent.ps1
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows' && success()
         with:

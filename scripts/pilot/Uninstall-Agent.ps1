@@ -16,6 +16,7 @@ if ($service) {
     Stop-Service ClubAgent -Force
     & sc.exe delete ClubAgent | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not remove ClubAgent.' }
+    $service.Dispose()
 }
 $data = Join-Path $env:ProgramData 'Club\Agent'
 $manifest = Join-Path $data 'installation.json'

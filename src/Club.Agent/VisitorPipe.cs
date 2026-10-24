@@ -23,7 +23,7 @@ public sealed class VisitorPipe(AgentConfiguration configuration, AgentRuntime r
             await pipe.WaitForConnectionAsync(stoppingToken);
             // One interactive visitor connection per gaming PC; credentials/cookies disappear with that pipe.
             try { await Serve(pipe, stoppingToken); }
-            catch (Exception ex) when (ex is IOException or OperationCanceledException or UnauthorizedAccessException or JsonException)
+            catch (Exception ex) when (ex is IOException or InvalidDataException or OperationCanceledException or UnauthorizedAccessException or JsonException)
             { logger.LogDebug("Visitor pipe closed: {Type}", ex.GetType().Name); }
         }
     }

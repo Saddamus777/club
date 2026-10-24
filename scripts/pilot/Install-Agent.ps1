@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'VisitorStartup.ps1')
 if (Get-ScheduledTask -TaskName 'ClubVisitor' -TaskPath '\' -ErrorAction SilentlyContinue) { throw 'ClubVisitor startup task already exists. Inspect it before installing.' }
 $serverUri = [Uri]$ServerUrl
-if ($serverUri.Scheme -ne 'https' -or $serverUri.AbsolutePath -ne '/' -or $serverUri.UserInfo) { throw 'Use an HTTPS server URL without credentials or a path.' }
+if (-not $serverUri.IsAbsoluteUri -or $serverUri.Scheme -ne 'https' -or $serverUri.AbsolutePath -ne '/' -or $serverUri.UserInfo -or $serverUri.Query -or $serverUri.Fragment) { throw 'Use an HTTPS server URL without credentials, path, query or fragment.' }
 $visitor = Get-LocalUser -Name $VisitorUser
 if ($visitor.SID -eq [Security.Principal.WindowsIdentity]::GetCurrent().User) { throw 'Use a separate standard Windows visitor account.' }
 $admins = Get-LocalGroup -SID 'S-1-5-32-544'
@@ -23,14 +23,38 @@ if (($cert.Thumbprint -replace ' ', '') -ne ($CertificateThumbprint -replace ' '
 if ($cert.NotAfter -le (Get-Date)) { throw 'Certificate has expired.' }
 if (Get-Service ClubAgent -ErrorAction SilentlyContinue) { throw 'ClubAgent already exists. Stop pilot sessions and uninstall it before replacing binaries.' }
 $root = Join-Path $env:ProgramFiles 'Club'
+$dataRoot = Join-Path $env:ProgramData 'Club'
 $data = Join-Path $env:ProgramData 'Club\Agent'
-if (Test-Path (Join-Path $data 'agent.json')) { throw 'Saved agent data exists. Reuse the same binding or archive it explicitly before reinstalling.' }
-New-Item -ItemType Directory -Force -Path $root, $data | Out-Null
-# Remove inherited write access BEFORE copying the device key.
-& icacls.exe $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Could not protect program directory.' }
-& icacls.exe $data /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Could not protect agent data.' }
+if ((Test-Path -LiteralPath $root) -or (Test-Path -LiteralPath $dataRoot)) {
+    throw 'Club program/data directory already exists. Archive the previous installation explicitly; existing directories will not be adopted or overwritten.'
+}
+function New-ProtectedDirectory([string]$Path, [bool]$AllowRead) {
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            (New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    if ($AllowRead) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            (New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    # Create with the final ACL, including the parent of the secret directory.
+    if ($PSVersionTable.PSEdition -eq 'Core') { [IO.FileSystemAclExtensions]::CreateDirectory($acl, $Path) | Out-Null }
+    else { [IO.Directory]::CreateDirectory($Path, $acl) | Out-Null }
+    $actual = Get-Acl -LiteralPath $Path
+    $expectedRules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value + ':' + $_.FileSystemRights + ':' + $_.InheritanceFlags + ':' + $_.PropagationFlags + ':' + $_.AccessControlType + ':' + $_.IsInherited } | Sort-Object)
+    $actualRules = @($actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value + ':' + $_.FileSystemRights + ':' + $_.InheritanceFlags + ':' + $_.PropagationFlags + ':' + $_.AccessControlType + ':' + $_.IsInherited } | Sort-Object)
+    if (((Get-Item -LiteralPath $Path).Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        -not $actual.AreAccessRulesProtected -or $actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544' -or
+        @(Compare-Object $expectedRules $actualRules).Count -ne 0) {
+        throw 'Directory ownership or permissions changed during installation. No device key was written.'
+    }
+}
+New-ProtectedDirectory $root $true
+New-ProtectedDirectory $dataRoot $false
+New-ProtectedDirectory $data $false
 Copy-Item -Path (Join-Path $PSScriptRoot '..\Agent') -Destination $root -Recurse -Force
 Copy-Item -Path (Join-Path $PSScriptRoot '..\Visitor') -Destination $root -Recurse -Force
 $config = @{ serverUrl = $ServerUrl; computerId = $binding.computerId; token = $binding.token; visitorSid = $visitor.SID.Value }
@@ -53,6 +77,9 @@ Register-ClubVisitorStartup -VisitorSid $visitor.SID.Value -Executable $visitorE
 @{ certificateThumbprint = $cert.Thumbprint; addedTrust = (-not $alreadyTrusted); visitorSid = $visitor.SID.Value; startupTask = 'ClubVisitor' } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $data 'installation.json') -Encoding UTF8
 Start-Service ClubAgent
+$installedService = Get-Service ClubAgent
+try { $installedService.WaitForStatus('Running', [TimeSpan]::FromSeconds(30)) }
+finally { $installedService.Dispose() }
 Write-Host 'Installed. Visitor starts at the next logon of the specified standard user, with limited rights.'
 Write-Host 'Configure installed games with Set-Games.ps1. No Windows shell/kiosk/autologon policy was changed.'
 Write-Host 'Delete the transported binding file after checking the installation. Keep the admin copy secure.'
