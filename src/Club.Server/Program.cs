@@ -12,10 +12,8 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
-LanHosting.Configure(builder);
 var dataDirectory = Path.GetFullPath(builder.Configuration["Club:DataDirectory"] ??
     Path.Combine(AppContext.BaseDirectory, ".data"));
-Directory.CreateDirectory(dataDirectory);
 
 if (args.Contains("--verify-backup") || args.Contains("--restore-backup"))
 {
@@ -27,6 +25,8 @@ if (args.Contains("--verify-backup") || args.Contains("--restore-backup"))
     Console.WriteLine(restore ? "Копия восстановлена. Предыдущая база сохранена. Сеансы потребуют ручного возобновления." : "Копия читается; целостность и баланс журнала проверены.");
     return;
 }
+LanHosting.Configure(builder);
+Directory.CreateDirectory(dataDirectory);
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IPasswordHasher<Account>, PasswordHasher<Account>>();

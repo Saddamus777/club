@@ -290,8 +290,11 @@ public sealed partial class ClubStore : IDisposable
                     FROM Audit x LEFT JOIN Accounts a ON a.Id=x.ActorId ORDER BY x.Id DESC LIMIT 100
                     """);
             }
+            var employees = account.Role == "Owner"
+                ? Rows(db, tx, "SELECT Id AS id,Username AS username,Role AS role FROM Accounts WHERE Role IN ('Owner','Admin') ORDER BY Username")
+                : [];
             tx.Commit();
-            return new { nowMs = Now, user = new { account.Id, account.Username, account.Role, account.BalanceMinor }, computers, packages, sessions, customers, report, audit, prototype = true };
+            return new { nowMs = Now, user = new { account.Id, account.Username, account.Role, account.BalanceMinor }, computers, packages, sessions, customers, employees, report, audit, prototype = true };
         }
     }
 

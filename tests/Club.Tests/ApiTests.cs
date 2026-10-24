@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Club.Server;
+using Club.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
@@ -158,9 +159,41 @@ public sealed class ApiTests
         var backup=await admin.PostAsJsonAsync("/api/admin/backups",new {});
         backup.EnsureSuccessStatusCode();
         var backupPath=Path.Combine(factory.DirectoryPath,"download.db");
-        await File.WriteAllBytesAsync(backupPath,await backup.Content.ReadAsByteArrayAsync());
+        await BackupDownload.Save(backup, backupPath, (file, _) => { Database.Verify(file); return Task.CompletedTask; });
         Database.Verify(backupPath);
         Assert.Contains("attachment",backup.Content.Headers.ContentDisposition!.ToString());
+        var restoredDirectory = Path.Combine(factory.DirectoryPath, "restored");
+        Database.Restore(restoredDirectory, backupPath);
+        using var restored = new ClubStore(restoredDirectory, TimeProvider.System, factory.Services.GetRequiredService<IPasswordHasher<Account>>());
+        Assert.Equal(10_000, restored.FindAccount(customer!)!.BalanceMinor);
+        Assert.Equal("Paused", JsonSerializer.SerializeToElement(restored.Snapshot(restored.FindAccount("owner", true)!.Id), ApiClient.Json).GetProperty("sessions")[0].GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task OnlyOwnerCanCreateOrListStaffAndPasswordsAreNotExposed()
+    {
+        await using var factory = new ApiFactory();
+        var store = factory.Services.GetRequiredService<ClubStore>();
+        store.CreateAccount("owner", Password, "Owner");
+        store.CreateAccount("visitor", Password);
+        using var owner = factory.CreateClient(); using var admin = factory.CreateClient(); using var visitor = factory.CreateClient();
+        await Login(owner, "owner");
+        var created = await owner.PostAsJsonAsync("/api/admin/staff", new { username = "employee", password = " employee-password-123 ", role = "Owner" });
+        created.EnsureSuccessStatusCode();
+        Assert.Equal("Admin", (await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("role").GetString());
+        await Token(admin);
+        (await admin.PostAsJsonAsync("/api/login", new { username = "employee", password = " employee-password-123 " })).EnsureSuccessStatusCode();
+        await Token(admin); await Login(visitor, "visitor");
+        foreach (var client in new[] { admin, visitor })
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/api/admin/staff", new { username = "forbidden", password = Password })).StatusCode);
+            Assert.Empty((await client.GetFromJsonAsync<JsonElement>("/api/state")).GetProperty("employees").EnumerateArray());
+        }
+        var state = await owner.GetFromJsonAsync<JsonElement>("/api/state");
+        var employees = state.GetProperty("employees");
+        Assert.Equal(2, employees.GetArrayLength());
+        Assert.All(employees.EnumerateArray(), employee => Assert.Equal(new[] { "id", "username", "role" }, employee.EnumerateObject().Select(p => p.Name)));
+        Assert.Equal(HttpStatusCode.Conflict, (await owner.PostAsJsonAsync("/api/admin/staff", new { username = "employee", password = Password })).StatusCode);
     }
 
     [Fact]

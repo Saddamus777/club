@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Security.AccessControl;
@@ -13,6 +14,20 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+#if ADMIN
+        if (args.Length == 2 && args[0] == "--download-backup-smoke")
+        {
+            try { NativeBackup.DownloadSmoke(args[1]).GetAwaiter().GetResult(); }
+            catch (Exception ex) { Console.Error.WriteLine(ex.Message); Environment.ExitCode = 1; }
+            return;
+        }
+        if (args.Length == 2 && args[0] == "--verify-backup-smoke")
+        {
+            try { NativeBackup.Verify(args[1], CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (Exception ex) { Console.Error.WriteLine(ex.Message); Environment.ExitCode = 1; }
+            return;
+        }
+#endif
 #if VISITOR
         // Manual launch and the logon task must not compete for the single visitor pipe.
         using var instance = new Mutex(true, "Local\\Club.Visitor." + WindowsIdentity.GetCurrent().User!.Value +
@@ -75,6 +90,15 @@ internal sealed class Transport : IDisposable
         pipe?.Dispose();
 #endif
     }
+    public Task DownloadBackup(string destination)
+    {
+#if ADMIN
+        NativeBackup.EnsureAvailable();
+        return api.DownloadBackup(destination, NativeBackup.Verify);
+#else
+        throw new InvalidOperationException("Копии доступны только на компьютере администратора.");
+#endif
+    }
 }
 
 internal sealed class MainWindow : Form
@@ -99,6 +123,7 @@ internal sealed class MainWindow : Form
     private bool loggedIn;
     private string? warnedSession;
     private readonly bool smoke;
+    private Button? createStaffButton;
 
     public MainWindow(bool smoke)
     {
@@ -132,7 +157,7 @@ internal sealed class MainWindow : Form
         Button(Staff ? "Создать владельца" : "Регистрация", Register);
         Button("Обновить", RefreshState);
         Button("Повторить незавершённый запрос", RetryPending);
-        Button("Выйти", async () => { await transport.Request("/api/logout", new { }); loggedIn = false; snapshot = default; foreach (var grid in grids.Values) grid.Rows.Clear(); status.Text = "Вы вышли из аккаунта."; });
+        Button("Выйти", async () => { await transport.Request("/api/logout", new { }); loggedIn = false; if (createStaffButton is not null) createStaffButton.Visible = false; snapshot = default; foreach (var grid in grids.Values) grid.Rows.Clear(); status.Text = "Вы вышли из аккаунта."; });
         if (Staff)
         {
             Grid("computers", "Компьютеры", ("id", "ID"), ("name", "Место"), ("managed", "Привязка"), ("occupied", "Занято"), ("lastSeenMs", "Связь (UTC ms)"));
@@ -140,6 +165,10 @@ internal sealed class MainWindow : Form
             Button("Добавить ПК", AddComputer); Button("Пополнить", TopUp); Button("Новый тариф", () => Package(false)); Button("Изменить тариф", () => Package(true));
             Button("Пауза", () => Session("pause")); Button("Продолжить", () => Session("resume")); Button("Завершить", () => Session("end"));
             Button("Бесплатное время", FreeSession); Button("Возврат", Refund); Button("Привязать ПК", BindDevice);
+            Button("Резервная копия", SaveBackup);
+            createStaffButton = Button("Новый сотрудник", CreateStaff);
+            createStaffButton.Visible = false;
+            Grid("employees", "Сотрудники (владелец)", ("id", "ID"), ("username", "Логин"), ("role", "Роль"));
         }
         else
         {
@@ -164,7 +193,7 @@ internal sealed class MainWindow : Form
             {
                 if (Staff)
                 {
-                    PackageEditor.Smoke(); MoneyEditor.Smoke();
+                    PackageEditor.Smoke(); MoneyEditor.Smoke(); StaffEditor.Smoke();
                     var balances = grids["customers"];
                     balances.Rows.Add("a", "test-a", 100.05m);
                     balances.Rows.Add("b", "test-b", 20.12m);
@@ -237,7 +266,7 @@ internal sealed class MainWindow : Form
         themeButton.Text = darkTheme ? "Светлый фон" : "Чёрный фон";
         tabs.Invalidate();
     }
-    private void Button(string title, Func<Task> action)
+    private Button Button(string title, Func<Task> action)
     {
         var button = new Button { Text = title, AutoSize = true, Margin = new Padding(4) };
         button.Click += async (_, _) =>
@@ -249,6 +278,7 @@ internal sealed class MainWindow : Form
             finally { busy = false; actions.Enabled = true; }
         };
         actions.Controls.Add(button);
+        return button;
     }
     private void Grid(string name, string title, params (string Key, string Caption)[] columns)
     {
@@ -297,11 +327,14 @@ internal sealed class MainWindow : Form
             if (name == "games") continue;
             var selected = grid.SelectedRows.Count == 1 ? Convert.ToString(grid.SelectedRows[0].Cells[0].Value) : null;
             grid.Rows.Clear();
+            // A still-running older server can serve existing functions until it is restarted.
+            if (name == "employees" && !snapshot.TryGetProperty(name, out _)) continue;
             foreach (var row in snapshot.GetProperty(name).EnumerateArray())
             {
                 var values = grid.Columns.Cast<DataGridViewColumn>().Select(c => row.TryGetProperty(c.Name, out var value)
                     ? c.Name is "priceMinor" or "balanceMinor" or "availableRefundMinor" ? (object)(value.GetInt64() / 100m)
-                    : c.Name == "active" ? (value.GetInt64() == 1 ? "Да" : "Нет") : value.ToString() : "").Cast<object>().ToArray();
+                    : c.Name == "active" ? (value.GetInt64() == 1 ? "Да" : "Нет")
+                    : c.Name == "role" ? (value.GetString() == "Owner" ? "Владелец" : "Администратор") : value.ToString() : "").Cast<object>().ToArray();
                 var index = grid.Rows.Add(values);
                 if (Convert.ToString(values[0]) == selected) grid.Rows[index].Selected = true;
             }
@@ -322,6 +355,7 @@ internal sealed class MainWindow : Form
             text.Text = string.Join(Environment.NewLine, lines);
         }
         var user = snapshot.GetProperty("user");
+        if (createStaffButton is not null) createStaffButton.Visible = user.GetProperty("role").GetString() == "Owner";
         status.Text = $"{user.GetProperty("username")} · Баланс: {KgsMoney.Format(user.GetProperty("balanceMinor").GetInt64())} сом. Команда выполнена, когда её номер совпал с подтверждением ПК.";
     }
     private async Task RefreshGames()
@@ -443,6 +477,34 @@ internal sealed class MainWindow : Form
         await Mutate("/api/admin/refunds", new { sessionId = id, result.AmountMinor, result.Method, result.Reason, result.OperationId });
     }
     private Task Purchase() => Mutate("/api/purchases", new { packageId = Selected("packages"), operationId = Guid.NewGuid() });
+    private async Task CreateStaff()
+    {
+        if (!loggedIn || snapshot.GetProperty("user").GetProperty("role").GetString() != "Owner")
+            throw new InvalidOperationException("Создавать сотрудников может только владелец.");
+        using var dialog = new StaffEditor(darkTheme);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            // Credentials must never enter the persistent pending-operation file.
+            await transport.Request("/api/admin/staff", dialog.Result!);
+        }
+        catch (Exception ex) when (ex is IOException or HttpRequestException or OperationCanceledException)
+        { throw new IOException("Ответ не получен. Обновите список сотрудников перед повтором: аккаунт мог быть создан.", ex); }
+        await RefreshState();
+        status.Text = "Сотрудник создан. Передайте ему начальный пароль лично.";
+    }
+    private async Task SaveBackup()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        NativeBackup.EnsureAvailable();
+        using var save = new SaveFileDialog { Title = "Сохранить новую резервную копию", Filter = "Резервная копия SQLite|*.db",
+            FileName = $"club-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}.db", OverwritePrompt = false };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        status.Text = "Создаётся и проверяется копия. Дождитесь результата перед извлечением носителя.";
+        try { await transport.DownloadBackup(save.FileName); }
+        catch { status.Text = "Новая копия не сохранена. Существующие файлы не заменялись."; throw; }
+        status.Text = "Копия сохранена и проверена: " + save.FileName + ". Храните носитель у владельца: копия содержит аккаунты и финансовые данные.";
+    }
     private async Task BindDevice()
     {
         if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
@@ -469,7 +531,7 @@ internal sealed class MainWindow : Form
         var ok = new Button { Text = "Подтвердить", DialogResult = DialogResult.OK, Left = 300, Top = 20 + labels.Length * 70, Width = 165 };
         dialog.Controls.Add(ok); dialog.AcceptButton = ok;
         DesktopTheme.Apply(dialog, darkTheme);
-        return dialog.ShowDialog(this) == DialogResult.OK ? entries.Select(x => x.Text.Trim()).ToArray() : null;
+        return dialog.ShowDialog(this) == DialogResult.OK ? entries.Select((x, i) => labels[i].Contains("парол", StringComparison.OrdinalIgnoreCase) ? x.Text : x.Text.Trim()).ToArray() : null;
     }
     private sealed record Pending(string UserId, string Path, string Json);
 }
@@ -477,6 +539,98 @@ internal sealed class MainWindow : Form
 internal sealed record PackageDraft(string? Id, string Name, int Minutes, long PriceMinor, bool Active, string OperationId);
 
 internal sealed record MoneyDraft(long AmountMinor, string Method, string Reason, string OperationId);
+
+internal static class NativeBackup
+{
+    public static async Task DownloadSmoke(string requestFile)
+    {
+        if (new FileInfo(requestFile).Length > 16384) throw new InvalidDataException("Invalid smoke request.");
+        using var request = JsonDocument.Parse(File.ReadAllText(requestFile));
+        using var transport = new Transport();
+        await transport.Request("/api/login", new { username = request.RootElement.GetProperty("username").GetString(), password = request.RootElement.GetProperty("password").GetString() });
+        await transport.DownloadBackup(request.RootElement.GetProperty("destination").GetString()!);
+        await transport.Request("/api/logout", new { });
+    }
+    private static string Server => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Server", "Club.Server.exe"));
+    public static void EnsureAvailable()
+    {
+        if (!File.Exists(Server)) throw new FileNotFoundException("Для проверки копии нужна папка Server из того же Windows-комплекта.");
+    }
+    public static async Task Verify(string path, CancellationToken ct)
+    {
+        EnsureAvailable();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2));
+        var start = new ProcessStartInfo(Server) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        start.ArgumentList.Add("--verify-backup"); start.ArgumentList.Add(Path.GetFullPath(path));
+        using var process = Process.Start(start) ?? throw new IOException("Не удалось запустить проверку копии.");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch
+        {
+            if (!process.HasExited) process.Kill(true);
+            await process.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(output, error);
+            throw;
+        }
+        await Task.WhenAll(output, error);
+        if (process.ExitCode != 0) throw new InvalidDataException("Копия не прошла проверку целостности и финансового журнала. Файл не принят.");
+    }
+}
+
+internal sealed record StaffDraft(string Username, string Password);
+
+internal sealed class StaffEditor : Form
+{
+    private readonly TextBox username = new() { Width = 420, MaxLength = 32 };
+    private readonly TextBox password = new() { Width = 420, MaxLength = 128, UseSystemPasswordChar = true };
+    private readonly TextBox confirmation = new() { Width = 420, MaxLength = 128, UseSystemPasswordChar = true };
+    private readonly Button save = new() { Text = "Создать администратора", AutoSize = true };
+    public StaffDraft? Result { get; private set; }
+    public StaffEditor(bool dark)
+    {
+        Text = "Новый сотрудник"; ClientSize = new Size(500, 420); Font = new Font("Segoe UI", 11);
+        FormBorderStyle = FormBorderStyle.FixedDialog; MinimizeBox = false; MaximizeBox = false; StartPosition = FormStartPosition.CenterParent;
+        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16) };
+        layout.Controls.AddRange([new Label { Text = "Логин: 3–32 латинских символа, цифры, . _ -", AutoSize = true }, username,
+            new Label { Text = "Начальный пароль: 10–128 символов", AutoSize = true }, password,
+            new Label { Text = "Повтор пароля", AutoSize = true }, confirmation,
+            new Label { Text = "Сотрудник сможет управлять тарифами,\nпополнениями, возвратами и сеансами.", AutoSize = true }]);
+        var buttons = new FlowLayoutPanel { AutoSize = true };
+        var cancel = new Button { Text = "Отмена", DialogResult = DialogResult.Cancel, AutoSize = true };
+        buttons.Controls.AddRange([save, cancel]); layout.Controls.Add(buttons); Controls.Add(layout);
+        AcceptButton = save; CancelButton = cancel;
+        void ValidateEntry() => save.Enabled = System.Text.RegularExpressions.Regex.IsMatch(username.Text.Trim(), @"\A[a-zA-Z0-9_.-]{3,32}\z") &&
+            password.Text.Length is >= 10 and <= 128 && password.Text == confirmation.Text;
+        username.TextChanged += (_, _) => ValidateEntry(); password.TextChanged += (_, _) => ValidateEntry(); confirmation.TextChanged += (_, _) => ValidateEntry();
+        ValidateEntry();
+        save.Click += (_, _) => { ValidateEntry(); if (!save.Enabled) return; Result = new(username.Text.Trim(), password.Text); DialogResult = DialogResult.OK; };
+        DesktopTheme.Apply(this, dark);
+    }
+    public static void Smoke()
+    {
+        foreach (var dark in new[] { true, false })
+        {
+            using var dialog = new StaffEditor(dark);
+            dialog.Shown += (_, _) => dialog.BeginInvoke(() =>
+            {
+                if (dialog.save.Enabled || !dialog.password.UseSystemPasswordChar || !dialog.confirmation.UseSystemPasswordChar) throw new InvalidOperationException("Unsafe initial staff form.");
+                dialog.username.Text = "employee"; dialog.password.Text = " secret-value-123 "; dialog.confirmation.Text = "different-value";
+                if (dialog.save.Enabled) throw new InvalidOperationException("Mismatched staff passwords accepted.");
+                dialog.confirmation.Text = dialog.password.Text; dialog.username.Text = "bad login";
+                if (dialog.save.Enabled) throw new InvalidOperationException("Invalid staff login accepted.");
+                dialog.username.Text = "employee";
+                var folder = Path.Combine(Environment.CurrentDirectory, "artifacts", "ui"); Directory.CreateDirectory(folder);
+                using var image = new Bitmap(dialog.Width, dialog.Height); dialog.DrawToBitmap(image, new Rectangle(Point.Empty, dialog.Size));
+                image.Save(Path.Combine(folder, $"Staff-{(dark ? "dark" : "light")}.png"));
+                dialog.save.PerformClick();
+            });
+            if (dialog.ShowDialog() != DialogResult.OK || dialog.Result is not { Username: "employee", Password: " secret-value-123 " })
+                throw new InvalidOperationException("Staff form changed the password or username.");
+        }
+    }
+}
 
 internal sealed class MoneyEditor : Form
 {

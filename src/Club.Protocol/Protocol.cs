@@ -75,6 +75,17 @@ public sealed class ApiClient : IDisposable
         http.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
         http.DefaultRequestHeaders.Add("X-CSRF-TOKEN", doc.RootElement.GetProperty("token").GetString());
     }
+    public async Task DownloadBackup(string destination, Func<string, CancellationToken, Task> verify, CancellationToken ct = default)
+    {
+        if (File.Exists(destination)) throw new IOException("Этот файл уже существует. Выберите новое имя копии.");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2));
+        await Security(timeout.Token);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/backups")
+            { Content = new StringContent("{}", Encoding.UTF8, "application/json") };
+        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+        await BackupDownload.Save(response, destination, verify, timeout.Token);
+    }
     public static JsonElement Ensure(RpcResponse response)
     {
         if (response.Status is >= 200 and < 300) return JsonSerializer.Deserialize<JsonElement>(response.Json);
