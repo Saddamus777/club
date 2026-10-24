@@ -58,7 +58,10 @@ function Probe([Management.Automation.PSCredential]$Credential, [string]$Mode) {
         -WorkingDirectory $shared -ArgumentList ('-NoProfile -NonInteractive -File "' + (Join-Path $shared 'probe.ps1') + '" -Mode ' + $Mode) `
         -PassThru -RedirectStandardOutput $output -RedirectStandardError $errorOutput
     try {
+        # Cache the native handle before exit; Start-Process -Credential may otherwise lose ExitCode.
+        $processHandle = $process.Handle
         if (-not $process.WaitForExit(60000)) { $process.Kill(); throw "Probe $Mode timed out." }
+        $process.WaitForExit() # Drain redirected output before inspecting it.
         Get-Content -LiteralPath $output -ErrorAction SilentlyContinue | Write-Host
         if ($process.ExitCode -ne 0) {
             Get-Content -LiteralPath $errorOutput -ErrorAction SilentlyContinue | Write-Host
