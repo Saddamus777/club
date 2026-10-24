@@ -1,6 +1,7 @@
 #Requires -RunAsAdministrator
 # Destructive only to this test's fresh fixture. Refuse an existing Club installation.
 $ErrorActionPreference = 'Stop'
+$testStarted = Get-Date
 $programRoot = Join-Path $env:ProgramFiles 'Club'
 $dataRoot = Join-Path $env:ProgramData 'Club'
 if ((Test-Path $programRoot) -or (Test-Path $dataRoot) -or (Get-Service ClubAgent -ErrorAction SilentlyContinue) -or
@@ -150,6 +151,14 @@ try {
     if (Test-Path ('Cert:\LocalMachine\Root\' + $cert.Thumbprint)) { throw 'Owned certificate trust remains after uninstall.' }
     if (-not (Test-Path (Join-Path $data 'session.json')) -or -not (Test-Path (Join-Path $data 'agent.json'))) { throw 'Uninstall removed recovery data.' }
     Write-Host 'PASS: uninstall removed service, startup task and owned certificate trust; recovery data preserved.'
+} catch {
+    # Service exceptions are written to Windows Event Log, not the CI process stdout.
+    foreach ($log in @('Application', 'System')) {
+        Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $testStarted } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'Club(\.Agent|Agent| gaming PC)' } |
+            Select-Object -First 12 | ForEach-Object { Write-Host ("SERVICE EVENT {0}/{1}: {2}" -f $_.ProviderName, $_.Id, $_.Message) }
+    }
+    throw
 } finally {
     Stop-FixtureServer
     if ($attemptedInstall) { & (Join-Path $setup 'Uninstall-Agent.ps1') }

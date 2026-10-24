@@ -33,7 +33,7 @@ internal static class WindowsSessions
                 {
                     var error = Marshal.GetLastWin32Error();
                     if (error == 1008) continue; // No logged-in user (ERROR_NO_TOKEN).
-                    throw new Win32Exception(error);
+                    throw new Win32Exception(error, $"Cannot query Windows session {session.Id} (state {session.State}); error {error}.");
                 }
                 try
                 {
