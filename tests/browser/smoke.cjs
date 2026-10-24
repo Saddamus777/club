@@ -67,6 +67,15 @@ async function waitFor(predicate, message) {
     admin.on('dialog',dialog=>dialog.accept('Проверка прототипа'));
     visitor.on('dialog',dialog=>dialog.accept());
     await admin.goto('http://127.0.0.1:5080');
+    assert.equal(await admin.evaluate(()=>getComputedStyle(document.body).backgroundColor),'rgb(0, 0, 0)');
+    await admin.locator('#theme-toggle').click();
+    assert.equal(await admin.locator('#theme-toggle').textContent(),'Чёрный фон');
+    await admin.reload();
+    assert.equal(await admin.evaluate(()=>document.documentElement.dataset.theme),'light');
+    await admin.locator('#theme-toggle').click();
+    await admin.reload();
+    assert.equal(await admin.evaluate(()=>getComputedStyle(document.body).backgroundColor),'rgb(0, 0, 0)');
+    assert.equal(await admin.locator('#theme-toggle').getAttribute('aria-pressed'),'true');
     await admin.locator('#owner-setup input[name=username]').fill('owner');
     await admin.locator('#owner-setup input[name=password]').fill(password);
     await admin.locator('#owner-setup input[name=confirmPassword]').fill('different-password');
@@ -140,7 +149,7 @@ async function waitFor(predicate, message) {
     assert.equal(await admin.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,'Mobile page must not overflow horizontally.');
     await admin.screenshot({path:path.join(root,'artifacts','admin-mobile.png'),fullPage:true});
     assert.deepEqual(errors,[]);
-    console.log('PASS: first-run owner setup without CLI, password confirmation, reload, browser registration, login, package setup, lost-response retry, purchase, pause/resume, real server restart, manual refund, report and downloaded backup. No page errors.');
+    console.log('PASS: black/light theme switch and reload persistence, first-run owner setup without CLI, password confirmation, reload, browser registration, login, package setup, lost-response retry, purchase, pause/resume, real server restart, manual refund, report and downloaded backup. No page errors.');
   } catch(error) {
     if(browser) {
       fs.mkdirSync(path.join(root,'artifacts'),{recursive:true});

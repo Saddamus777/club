@@ -4,7 +4,7 @@ namespace Club.Server;
 
 public static class Database
 {
-    public const int Version = 1;
+    public const int Version = 2;
     public static SqliteConnection Open(string path, bool readOnly = false)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -38,11 +38,11 @@ public static class Database
     public static void Initialize(SqliteConnection c)
     {
         var version = Number(c, null, "PRAGMA user_version");
-        if (version != 0 && version != Version) throw new InvalidOperationException("Неподдерживаемая версия базы.");
+        if (version is < 0 or > Version) throw new InvalidOperationException("Неподдерживаемая версия базы.");
         Execute(c, null, "PRAGMA journal_mode=WAL;");
         if (version == Version) return;
         using var tx = c.BeginTransaction();
-        Execute(c, tx, """
+        if (version == 0) Execute(c, tx, """
             CREATE TABLE Accounts(Id TEXT PRIMARY KEY, Username TEXT NOT NULL COLLATE NOCASE UNIQUE,
               Role TEXT NOT NULL CHECK(Role IN ('Owner','Admin','Customer')), PasswordHash TEXT NOT NULL,
               BalanceMinor INTEGER NOT NULL DEFAULT 0 CHECK(BalanceMinor >= 0));
@@ -68,6 +68,18 @@ public static class Database
               Fingerprint TEXT NOT NULL, ResultJson TEXT NOT NULL, CreatedMs INTEGER NOT NULL);
             PRAGMA user_version=1;
             """);
+        Execute(c, tx, """
+            CREATE TABLE Devices(ComputerId TEXT PRIMARY KEY REFERENCES Computers(Id), TokenHash TEXT NOT NULL,
+              BootId TEXT, Sequence INTEGER NOT NULL DEFAULT 0, LastSeenMs INTEGER NOT NULL DEFAULT 0);
+            ALTER TABLE Sessions ADD COLUMN Managed INTEGER NOT NULL DEFAULT 0 CHECK(Managed IN (0,1));
+            ALTER TABLE Sessions ADD COLUMN Revision INTEGER NOT NULL DEFAULT 1 CHECK(Revision>0);
+            ALTER TABLE Sessions ADD COLUMN AckRevision INTEGER NOT NULL DEFAULT 0 CHECK(AckRevision>=0 AND AckRevision<=Revision);
+            DROP INDEX OneActiveComputer;
+            DROP INDEX OneActiveCustomer;
+            CREATE UNIQUE INDEX OneActiveComputer ON Sessions(ComputerId) WHERE Status IN ('Running','Paused') OR (Managed=1 AND AckRevision<Revision);
+            CREATE UNIQUE INDEX OneActiveCustomer ON Sessions(CustomerId) WHERE Status IN ('Running','Paused') OR (Managed=1 AND AckRevision<Revision);
+            PRAGMA user_version=2;
+            """);
         tx.Commit();
     }
 
@@ -76,7 +88,8 @@ public static class Database
         using var db = Open(path, true);
         using var cmd = Command(db, null, "PRAGMA integrity_check");
         if (!Equals(cmd.ExecuteScalar(), "ok")) throw new InvalidDataException("Нарушена целостность базы.");
-        if (Number(db, null, "PRAGMA user_version") != Version) throw new InvalidDataException("Неподдерживаемый формат копии.");
+        var version = Number(db, null, "PRAGMA user_version");
+        if (version is < 1 or > Version) throw new InvalidDataException("Неподдерживаемый формат копии.");
         using var foreign = Command(db, null, "PRAGMA foreign_key_check");
         using (var reader = foreign.ExecuteReader())
             if (reader.Read()) throw new InvalidDataException("Нарушены связи в базе.");
@@ -84,6 +97,7 @@ public static class Database
             SELECT COUNT(*) FROM Accounts a WHERE a.BalanceMinor !=
               COALESCE((SELECT SUM(WalletDelta) FROM Ledger l WHERE l.CustomerId=a.Id),0)
             """) != 0) throw new InvalidDataException("Баланс не сходится с журналом операций.");
+        if (version == 2) _ = Number(db, null, "SELECT COUNT(*) FROM Devices");
         // Require the rest of this application's schema even if an unrelated SQLite file declares version 1.
         foreach (var table in new[] { "Computers", "Packages", "Sessions", "Audit", "Commands" })
             _ = Number(db, null, $"SELECT COUNT(*) FROM {table}");

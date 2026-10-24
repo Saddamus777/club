@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Threading.RateLimiting;
 using Club.Server;
+using Club.Protocol;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -11,9 +12,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
-// The first prototype is deliberately restricted to this machine, without a LAN exception.
-builder.WebHost.UseUrls("http://127.0.0.1:5080");
-builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 16_384);
+LanHosting.Configure(builder);
 var dataDirectory = Path.GetFullPath(builder.Configuration["Club:DataDirectory"] ??
     Path.Combine(AppContext.BaseDirectory, ".data"));
 Directory.CreateDirectory(dataDirectory);
@@ -66,6 +65,9 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
+    options.AddPolicy("device", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "local", _ => new FixedWindowRateLimiterOptions
+        { PermitLimit = 120, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
     options.AddPolicy("auth", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "local", _ => new FixedWindowRateLimiterOptions
         {
@@ -96,7 +98,15 @@ app.Use(async (context, next) =>
     context.Response.Headers.XContentTypeOptions = "nosniff";
     context.Response.Headers["Referrer-Policy"] = "no-referrer";
     context.Response.Headers.CacheControl = "no-store";
-    try { await next(); }
+    try
+    {
+        if (context.Connection.RemoteIpAddress is { } address && !IPAddress.IsLoopback(address))
+        {
+            if (!context.Request.IsHttps) throw new RuleException("Для LAN требуется HTTPS.", 403);
+            if (context.Request.Path.StartsWithSegments("/api/admin")) throw new RuleException("Управление доступно только на ПК администратора.", 403);
+        }
+        await next();
+    }
     catch (RuleException ex)
     {
         context.Response.StatusCode = ex.Status;
@@ -118,6 +128,13 @@ app.Use(async (context, next) =>
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseAuthentication();
+app.Use(async (context, next) =>
+{
+    if (context.Connection.RemoteIpAddress is { } address && !IPAddress.IsLoopback(address) &&
+        (context.User.IsInRole("Owner") || context.User.IsInRole("Admin")))
+        throw new RuleException("Сотрудник может работать только на ПК администратора.", 403);
+    await next();
+});
 app.UseAuthorization();
 app.UseRateLimiter();
 app.Use(async (context, next) =>
@@ -135,6 +152,12 @@ app.Use(async (context, next) =>
     await next();
 });
 
+// Device endpoint uses its own credential and accepts HTTPS only; it never uses cookie authority.
+app.MapPost("/device/heartbeat", (HttpContext context, DeviceReport report) =>
+{
+    if (!context.Request.IsHttps) throw new RuleException("Для устройства требуется HTTPS.", 403);
+    return store.DeviceHeartbeat(context.Request.Headers["X-Club-Device"], report);
+}).RequireRateLimiting("device");
 app.MapGet("/health", () => Results.Ok(new { status = "ok", prototype = true }));
 app.MapGet("/api/security", (HttpContext context, IAntiforgery antiforgery) =>
     Results.Ok(new { token = antiforgery.GetAndStoreTokens(context).RequestToken, ownerExists = store.HasOwner() }));
@@ -157,6 +180,8 @@ app.MapPost("/api/login", async (RegisterRequest request, HttpContext context) =
 {
     var account = store.FindAccount((request.Username ?? "").Trim(), true);
     if (account is null || !store.VerifyPassword(account, request.Password ?? "")) throw new RuleException("Неверный логин или пароль.", 401);
+    if (account.Role is "Owner" or "Admin" && context.Connection.RemoteIpAddress is { } remote && !IPAddress.IsLoopback(remote))
+        throw new RuleException("Вход сотрудника доступен только на ПК администратора.", 403);
     var identity = new ClaimsIdentity(new[]
     {
         new Claim(ClaimTypes.NameIdentifier, account.Id), new Claim(ClaimTypes.Name, account.Username), new Claim(ClaimTypes.Role, account.Role)
@@ -170,13 +195,14 @@ app.MapPost("/api/logout", async (HttpContext context) =>
     return Results.Ok();
 }).RequireAuthorization();
 app.MapGet("/api/state", (ClaimsPrincipal user) => store.Snapshot(Id(user))).RequireAuthorization();
-app.MapPost("/api/purchases", (ClaimsPrincipal user, PurchaseRequest request) => store.Purchase(Id(user), request)).RequireAuthorization("Customer");
+app.MapPost("/api/purchases", (ClaimsPrincipal user, PurchaseRequest request, HttpContext context) => store.Purchase(Id(user), request, context.Request.Headers["X-Club-Device"])).RequireAuthorization("Customer");
 var admin = app.MapGroup("/api/admin").RequireAuthorization("Staff");
 admin.MapPost("/staff", (ClaimsPrincipal user, RegisterRequest request) =>
 {
     var account = store.CreateAccount(request.Username ?? "", request.Password ?? "", "Admin", Id(user));
     return Results.Ok(new { account.Id, account.Username, account.Role });
 }).RequireAuthorization("Owner");
+admin.MapPost("/devices", (ClaimsPrincipal user, DeviceBinding request) => store.BindDevice(Id(user), request));
 admin.MapPost("/computers", (ClaimsPrincipal user, ComputerRequest request) => store.AddComputer(Id(user), request));
 admin.MapPost("/packages", (ClaimsPrincipal user, PackageRequest request) => store.SavePackage(Id(user), request));
 admin.MapPost("/topups", (ClaimsPrincipal user, TopUpRequest request) => store.TopUp(Id(user), request));

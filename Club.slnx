@@ -1,4 +1,10 @@
 <Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Club.Admin/Club.Admin.csproj" />
+    <Project Path="src/Club.Agent/Club.Agent.csproj" />
+    <Project Path="src/Club.Visitor/Club.Visitor.csproj" />
+  </Folder>
+  <Project Path="src/Club.Protocol/Club.Protocol.csproj" />
   <Project Path="src/Club.Server/Club.Server.csproj" />
   <Project Path="tests/Club.Tests/Club.Tests.csproj" />
 </Solution>
