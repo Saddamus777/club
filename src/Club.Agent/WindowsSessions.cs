@@ -6,6 +6,7 @@ namespace Club.Agent;
 
 internal static class WindowsSessions
 {
+    private const int WtsListen = 6;
     [StructLayout(LayoutKind.Sequential)]
     private struct SessionInfo { public int Id; public IntPtr Station; public int State; }
     [DllImport("wtsapi32.dll", SetLastError = true)]
@@ -28,7 +29,8 @@ internal static class WindowsSessions
             for (var i = 0; i < count; i++)
             {
                 var session = Marshal.PtrToStructure<SessionInfo>(buffer + i * Marshal.SizeOf<SessionInfo>());
-                if (session.Id == 0) continue;
+                // RDP listener entries (WTSListen) have no user token and cannot be logged off.
+                if (session.Id == 0 || session.State == WtsListen) continue;
                 if (!WTSQueryUserToken((uint)session.Id, out var token))
                 {
                     var error = Marshal.GetLastWin32Error();
