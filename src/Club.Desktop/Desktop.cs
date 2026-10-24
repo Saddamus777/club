@@ -136,7 +136,7 @@ internal sealed class MainWindow : Form
         if (Staff)
         {
             Grid("computers", "Компьютеры", ("id", "ID"), ("name", "Место"), ("managed", "Привязка"), ("occupied", "Занято"), ("lastSeenMs", "Связь (UTC ms)"));
-            Grid("customers", "Посетители", ("id", "ID"), ("username", "Логин"), ("balanceMinor", "Баланс, тыйын"));
+            Grid("customers", "Посетители", ("id", "ID"), ("username", "Логин"), ("balanceMinor", "Баланс, сом"));
             Button("Добавить ПК", AddComputer); Button("Пополнить", TopUp); Button("Новый тариф", () => Package(false)); Button("Изменить тариф", () => Package(true));
             Button("Пауза", () => Session("pause")); Button("Продолжить", () => Session("resume")); Button("Завершить", () => Session("end"));
             Button("Бесплатное время", FreeSession); Button("Возврат", Refund); Button("Привязать ПК", BindDevice);
@@ -149,7 +149,7 @@ internal sealed class MainWindow : Form
             Grid("games", "Игры и браузер", ("id", "ID"), ("name", "Название"));
         }
         Grid("packages", "Пакеты", ("id", "ID"), ("name", "Название"), ("minutes", "Минуты"), ("priceMinor", "Цена, сом"), ("active", "Активен"));
-        Grid("sessions", "Сеансы", ("id", "ID"), ("username", "Посетитель"), ("computerName", "ПК"), ("packageName", "Пакет"), ("remainingMs", "Остаток, мс"), ("status", "Состояние"), ("revision", "Команда"), ("ackRevision", "Подтверждение"), ("availableRefundMinor", "Доступный возврат, тыйын"));
+        Grid("sessions", "Сеансы", ("id", "ID"), ("username", "Посетитель"), ("computerName", "ПК"), ("packageName", "Пакет"), ("remainingMs", "Остаток, мс"), ("status", "Состояние"), ("revision", "Команда"), ("ackRevision", "Подтверждение"), ("availableRefundMinor", "Доступный возврат, сом"));
         if (Staff)
         {
             Grid("audit", "Журнал", ("createdMs", "UTC ms"), ("actor", "Сотрудник"), ("action", "Операция"), ("details", "Описание"));
@@ -162,7 +162,17 @@ internal sealed class MainWindow : Form
         {
             if (smoke)
             {
-                if (Staff) PackageEditor.Smoke();
+                if (Staff)
+                {
+                    PackageEditor.Smoke(); MoneyEditor.Smoke();
+                    var balances = grids["customers"];
+                    balances.Rows.Add("a", "test-a", 100.05m);
+                    balances.Rows.Add("b", "test-b", 20.12m);
+                    balances.Sort(balances.Columns["balanceMinor"]!, System.ComponentModel.ListSortDirection.Ascending);
+                    if (Convert.ToString(balances.Rows[0].Cells["id"].Value) != "b" || Convert.ToString(balances.Rows[0].Cells["balanceMinor"].FormattedValue) != "20,12")
+                        throw new InvalidOperationException("Money grid must format soms and sort numerically.");
+                    balances.Rows.Clear();
+                }
                 var timer = new System.Windows.Forms.Timer { Interval = 500 };
                 var original = darkTheme;
                 darkTheme = true; ApplyTheme();
@@ -245,7 +255,17 @@ internal sealed class MainWindow : Form
         var grid = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false,
             AllowUserToDeleteRows = false, MultiSelect = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
             AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, RowHeadersVisible = false };
-        foreach (var (key, caption) in columns) grid.Columns.Add(key, caption);
+        foreach (var (key, caption) in columns)
+        {
+            var index = grid.Columns.Add(key, caption);
+            if (key is "priceMinor" or "balanceMinor" or "availableRefundMinor")
+            {
+                grid.Columns[index].ValueType = typeof(decimal);
+                grid.Columns[index].DefaultCellStyle.Format = "0.00";
+                grid.Columns[index].DefaultCellStyle.FormatProvider = System.Globalization.CultureInfo.GetCultureInfo("ru-RU");
+                grid.Columns[index].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+            }
+        }
         grid.Columns["id"]?.SetVisible(false);
         var page = new TabPage(title); page.Controls.Add(grid); tabs.TabPages.Add(page); grids[name] = grid;
     }
@@ -280,7 +300,7 @@ internal sealed class MainWindow : Form
             foreach (var row in snapshot.GetProperty(name).EnumerateArray())
             {
                 var values = grid.Columns.Cast<DataGridViewColumn>().Select(c => row.TryGetProperty(c.Name, out var value)
-                    ? c.Name == "priceMinor" ? (value.GetInt64() / 100m).ToString("0.00")
+                    ? c.Name is "priceMinor" or "balanceMinor" or "availableRefundMinor" ? (object)(value.GetInt64() / 100m)
                     : c.Name == "active" ? (value.GetInt64() == 1 ? "Да" : "Нет") : value.ToString() : "").Cast<object>().ToArray();
                 var index = grid.Rows.Add(values);
                 if (Convert.ToString(values[0]) == selected) grid.Rows[index].Selected = true;
@@ -294,15 +314,15 @@ internal sealed class MainWindow : Form
             foreach (var (key, label) in new[] { ("topUpsMinor", "Пополнения"), ("purchasesMinor", "Покупки"),
                 ("refundsMinor", "Выданные возвраты"), ("walletBalancesMinor", "Остатки на балансах"),
                 ("cashNetMinor", "Наличные: получено минус возвраты"), ("transferNetMinor", "Переводы: получено минус возвраты") })
-                lines.Add($"{label}: {report.GetProperty(key).GetInt64() / 100m:0.00} сом");
+                lines.Add($"{label}: {KgsMoney.Format(report.GetProperty(key).GetInt64())} сом");
             lines.Add(""); lines.Add("Операции сотрудников за всё время:");
             foreach (var row in report.GetProperty("byEmployee").EnumerateArray())
                 lines.Add($"{row.GetProperty("username")}: {(row.GetProperty("kind").GetString() == "TopUp" ? "Пополнение" : "Возврат")}, " +
-                    $"{(row.GetProperty("method").GetString() == "Cash" ? "наличные" : "перевод")} — {row.GetProperty("amountMinor").GetInt64() / 100m:0.00} сом, операций: {row.GetProperty("operations")}");
+                    $"{(row.GetProperty("method").GetString() == "Cash" ? "наличные" : "перевод")} — {KgsMoney.Format(row.GetProperty("amountMinor").GetInt64())} сом, операций: {row.GetProperty("operations")}");
             text.Text = string.Join(Environment.NewLine, lines);
         }
         var user = snapshot.GetProperty("user");
-        status.Text = $"{user.GetProperty("username")} · Баланс: {user.GetProperty("balanceMinor").GetInt64() / 100m:0.00} сом. Команда выполнена, когда её номер совпал с подтверждением ПК.";
+        status.Text = $"{user.GetProperty("username")} · Баланс: {KgsMoney.Format(user.GetProperty("balanceMinor").GetInt64())} сом. Команда выполнена, когда её номер совпал с подтверждением ПК.";
     }
     private async Task RefreshGames()
     {
@@ -375,7 +395,21 @@ internal sealed class MainWindow : Form
         await RefreshState(); status.Text += " Запрос подтверждён.";
     }
     private Task AddComputer() { var v = Ask("Новое место", "Название"); return v is null ? Task.CompletedTask : Mutate("/api/admin/computers", new { name = v[0], operationId = Guid.NewGuid() }); }
-    private Task TopUp() { var customer = Selected("customers"); var v = Ask("Пополнение выбранного посетителя", "Сумма в тыйынах", "Способ: Cash или Transfer"); return v is null ? Task.CompletedTask : Mutate("/api/admin/topups", new { customerId = customer, amountMinor = long.Parse(v[0]), method = v[1], operationId = Guid.NewGuid() }); }
+    private async Task TopUp()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        var customer = Selected("customers");
+        await RefreshState();
+        var row = snapshot.GetProperty("customers").EnumerateArray().Single(r => r.GetProperty("id").GetString() == customer);
+        var balance = row.GetProperty("balanceMinor").GetInt64();
+        var limit = Math.Min(KgsMoney.OperationLimitMinor, KgsMoney.BalanceLimitMinor - balance);
+        if (limit <= 0) throw new InvalidOperationException("Достигнут допустимый баланс. Пополнение недоступно.");
+        using var dialog = new MoneyEditor(darkTheme, false, limit,
+            $"Посетитель: {row.GetProperty("username")}\nБаланс: {KgsMoney.Format(balance)} сом");
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var result = dialog.Result!;
+        await Mutate("/api/admin/topups", new { customerId = customer, result.AmountMinor, result.Method, result.OperationId });
+    }
     private Task Package(bool edit)
     {
         if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
@@ -392,7 +426,22 @@ internal sealed class MainWindow : Form
 
     private Task Session(string action) { var id = Selected("sessions"); var v = Ask("Управление сеансом", "Причина"); return v is null ? Task.CompletedTask : Mutate($"/api/admin/sessions/{id}/{action}", new { reason = v[0], operationId = Guid.NewGuid() }); }
     private Task FreeSession() { var customer = Selected("customers"); var computer = Selected("computers"); var v = Ask("Бесплатное время для выбранных посетителя и ПК", "Минуты", "Причина"); return v is null ? Task.CompletedTask : Mutate("/api/admin/free-sessions", new { customerId = customer, computerId = computer, minutes = int.Parse(v[0]), reason = v[1], operationId = Guid.NewGuid() }); }
-    private Task Refund() { var id = Selected("sessions"); var v = Ask("Ручной возврат за выбранный сеанс", "Сумма в тыйынах", "Способ: Cash или Transfer", "Причина"); return v is null ? Task.CompletedTask : Mutate("/api/admin/refunds", new { sessionId = id, amountMinor = long.Parse(v[0]), method = v[1], reason = v[2], operationId = Guid.NewGuid() }); }
+    private async Task Refund()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        var id = Selected("sessions");
+        await RefreshState();
+        var row = snapshot.GetProperty("sessions").EnumerateArray().Single(r => r.GetProperty("id").GetString() == id);
+        if (row.GetProperty("status").GetString() != "Ended" || (row.GetProperty("managed").GetInt64() == 1 && row.GetProperty("ackRevision").GetInt64() < row.GetProperty("revision").GetInt64()))
+            throw new InvalidOperationException("Сначала завершите сеанс и дождитесь подтверждения игрового ПК.");
+        var limit = Math.Min(KgsMoney.OperationLimitMinor, row.GetProperty("availableRefundMinor").GetInt64());
+        if (limit <= 0) throw new InvalidOperationException("У этого сеанса нет доступной суммы возврата.");
+        using var dialog = new MoneyEditor(darkTheme, true, limit,
+            $"Посетитель: {row.GetProperty("username")}\nПК: {row.GetProperty("computerName")} · {row.GetProperty("packageName")}");
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var result = dialog.Result!;
+        await Mutate("/api/admin/refunds", new { sessionId = id, result.AmountMinor, result.Method, result.Reason, result.OperationId });
+    }
     private Task Purchase() => Mutate("/api/purchases", new { packageId = Selected("packages"), operationId = Guid.NewGuid() });
     private async Task BindDevice()
     {
@@ -426,6 +475,111 @@ internal sealed class MainWindow : Form
 }
 
 internal sealed record PackageDraft(string? Id, string Name, int Minutes, long PriceMinor, bool Active, string OperationId);
+
+internal sealed record MoneyDraft(long AmountMinor, string Method, string Reason, string OperationId);
+
+internal sealed class MoneyEditor : Form
+{
+    private readonly TextBox amount = new() { Width = 220, MaxLength = 16 };
+    private readonly ComboBox method = new() { Width = 220, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly TextBox reason = new() { Width = 520, Height = 65, Multiline = true, MaxLength = 500 };
+    private readonly Button save = new() { AutoSize = true };
+    public MoneyDraft? Result { get; private set; }
+
+    public MoneyEditor(bool dark, bool refund, long maximumMinor, string context)
+    {
+        if (maximumMinor is <= 0 or > KgsMoney.OperationLimitMinor) throw new ArgumentOutOfRangeException(nameof(maximumMinor));
+        Text = refund ? "Ручной возврат" : "Пополнение баланса";
+        ClientSize = new Size(580, 620); Font = new Font("Segoe UI", 11);
+        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16) };
+        Label Line(string text) => new() { Text = text, AutoSize = true, MaximumSize = new Size(520, 0) };
+        method.Items.AddRange(["Наличные", "Перевод"]);
+        layout.Controls.AddRange([Line(context),
+            Line($"{(refund ? "Доступно к возврату" : "Максимум пополнения")}: {KgsMoney.Format(maximumMinor)} сом"),
+            Line("Сумма, сом (например, 100,50 или 100.50)"), amount,
+            Line(refund ? "Способ выдачи" : "Способ оплаты"), method]);
+        if (refund) layout.Controls.AddRange([Line("Причина возврата"), reason]);
+        layout.Controls.Add(Line(refund ? "Выдайте возврат посетителю вручную.\nВозврат не увеличивает внутренний баланс."
+            : "Подтверждайте пополнение после получения оплаты."));
+        var summary = Line(""); layout.Controls.Add(summary);
+        var buttons = new FlowLayoutPanel { AutoSize = true };
+        save.Text = refund ? "Подтвердить возврат" : "Подтвердить пополнение";
+        var cancel = new Button { Text = "Отмена", DialogResult = DialogResult.Cancel, AutoSize = true };
+        buttons.Controls.AddRange([save, cancel]); layout.Controls.Add(buttons); Controls.Add(layout);
+        AcceptButton = save; CancelButton = cancel;
+        void UpdateEntry()
+        {
+            var valid = KgsMoney.TryParseAmount(amount.Text, maximumMinor, out var minor);
+            save.Enabled = valid && method.SelectedIndex >= 0 && (!refund || !string.IsNullOrWhiteSpace(reason.Text));
+            summary.Text = !valid ? "Введите положительную сумму в пределах лимита,\nне более двух знаков после запятой, без разделителей тысяч."
+                : method.SelectedIndex < 0 ? "Выберите наличные или перевод."
+                : refund && string.IsNullOrWhiteSpace(reason.Text) ? "Укажите причину возврата."
+                : $"{(refund ? "К выдаче" : "К зачислению")}: {KgsMoney.Format(minor)} сом · {method.Text.ToLowerInvariant()}";
+        }
+        amount.TextChanged += (_, _) => UpdateEntry();
+        method.SelectedIndexChanged += (_, _) => UpdateEntry();
+        reason.TextChanged += (_, _) => UpdateEntry();
+        UpdateEntry();
+        save.Click += (_, _) =>
+        {
+            UpdateEntry();
+            if (!save.Enabled || !KgsMoney.TryParseAmount(amount.Text, maximumMinor, out var minor)) return;
+            Result = new(minor, method.SelectedIndex == 0 ? "Cash" : "Transfer", refund ? reason.Text.Trim() : "", Guid.NewGuid().ToString());
+            DialogResult = DialogResult.OK;
+        };
+        DesktopTheme.Apply(this, dark);
+    }
+
+    public static void Smoke()
+    {
+        foreach (var dark in new[] { true, false })
+        foreach (var refund in new[] { false, true })
+        {
+            var cap = refund ? 12345 : KgsMoney.OperationLimitMinor;
+            using var dialog = new MoneyEditor(dark, refund, cap, "Посетитель: test-customer\nПК: PC-01");
+            dialog.Shown += (_, _) => dialog.BeginInvoke(() =>
+            {
+                if (dialog.save.Enabled) throw new InvalidOperationException("Empty payment accepted.");
+                dialog.amount.Text = "123,45";
+                if (dialog.save.Enabled) throw new InvalidOperationException("Missing payment method accepted.");
+                dialog.method.SelectedIndex = dark ? 0 : 1;
+                if (refund && dialog.save.Enabled) throw new InvalidOperationException("Missing refund reason accepted.");
+                dialog.reason.Text = "  Неиспользованный остаток  ";
+                if (!dialog.save.Enabled) throw new InvalidOperationException("Valid payment rejected.");
+                foreach (var invalid in new[] { "0", "-1", "123,456", "1,000", KgsMoney.Format(cap + 1) })
+                {
+                    dialog.amount.Text = invalid;
+                    if (dialog.save.Enabled) throw new InvalidOperationException("Invalid amount accepted: " + invalid);
+                }
+                dialog.amount.Text = KgsMoney.Format(cap);
+                if (!dialog.save.Enabled) throw new InvalidOperationException("Exact payment cap rejected.");
+                dialog.amount.Text = dark ? "123,45" : "0.01";
+                var output = Path.Combine(Environment.CurrentDirectory, "artifacts", "ui");
+                Directory.CreateDirectory(output);
+                using var image = new Bitmap(dialog.Width, dialog.Height);
+                dialog.DrawToBitmap(image, new Rectangle(Point.Empty, dialog.Size));
+                image.Save(Path.Combine(output, $"{(refund ? "Refund" : "TopUp")}-{(dark ? "dark" : "light")}.png"));
+                dialog.save.PerformClick();
+            });
+            if (dialog.ShowDialog() != DialogResult.OK || dialog.Result is null || dialog.Result.AmountMinor != (dark ? 12345 : 1) ||
+                dialog.Result.Method != (dark ? "Cash" : "Transfer") || dialog.Result.Reason != (refund ? "Неиспользованный остаток" : "") ||
+                !Guid.TryParse(dialog.Result.OperationId, out _)) throw new InvalidOperationException("Payment dialog returned incorrect minor units or method.");
+            var wire = JsonSerializer.SerializeToElement(dialog.Result, ApiClient.Json);
+            if (wire.GetProperty("amountMinor").GetInt64() != dialog.Result.AmountMinor || wire.GetProperty("method").GetString() != dialog.Result.Method)
+                throw new InvalidOperationException("Payment wire representation changed amount or method.");
+        }
+        using var cancelled = new MoneyEditor(true, false, 10000, "Отмена операции");
+        cancelled.Shown += (_, _) => cancelled.BeginInvoke(() =>
+        {
+            cancelled.amount.Text = "100"; cancelled.method.SelectedIndex = 0;
+            cancelled.CancelButton!.PerformClick();
+        });
+        if (cancelled.ShowDialog() != DialogResult.Cancel || cancelled.Result is not null)
+            throw new InvalidOperationException("Cancelled payment produced an operation.");
+    }
+}
 
 internal sealed class PackageEditor : Form
 {
