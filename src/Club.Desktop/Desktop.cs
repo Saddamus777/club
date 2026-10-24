@@ -137,7 +137,7 @@ internal sealed class MainWindow : Form
         {
             Grid("computers", "Компьютеры", ("id", "ID"), ("name", "Место"), ("managed", "Привязка"), ("occupied", "Занято"), ("lastSeenMs", "Связь (UTC ms)"));
             Grid("customers", "Посетители", ("id", "ID"), ("username", "Логин"), ("balanceMinor", "Баланс, тыйын"));
-            Button("Добавить ПК", AddComputer); Button("Пополнить", TopUp); Button("Тариф", Package);
+            Button("Добавить ПК", AddComputer); Button("Пополнить", TopUp); Button("Новый тариф", () => Package(false)); Button("Изменить тариф", () => Package(true));
             Button("Пауза", () => Session("pause")); Button("Продолжить", () => Session("resume")); Button("Завершить", () => Session("end"));
             Button("Бесплатное время", FreeSession); Button("Возврат", Refund); Button("Привязать ПК", BindDevice);
         }
@@ -148,7 +148,7 @@ internal sealed class MainWindow : Form
             Button("Запустить игру", LaunchGame);
             Grid("games", "Игры и браузер", ("id", "ID"), ("name", "Название"));
         }
-        Grid("packages", "Пакеты", ("id", "ID"), ("name", "Название"), ("minutes", "Минуты"), ("priceMinor", "Цена, тыйын"), ("active", "Активен"));
+        Grid("packages", "Пакеты", ("id", "ID"), ("name", "Название"), ("minutes", "Минуты"), ("priceMinor", "Цена, сом"), ("active", "Активен"));
         Grid("sessions", "Сеансы", ("id", "ID"), ("username", "Посетитель"), ("computerName", "ПК"), ("packageName", "Пакет"), ("remainingMs", "Остаток, мс"), ("status", "Состояние"), ("revision", "Команда"), ("ackRevision", "Подтверждение"), ("availableRefundMinor", "Доступный возврат, тыйын"));
         if (Staff)
         {
@@ -162,6 +162,7 @@ internal sealed class MainWindow : Form
         {
             if (smoke)
             {
+                if (Staff) PackageEditor.Smoke();
                 var timer = new System.Windows.Forms.Timer { Interval = 500 };
                 var original = darkTheme;
                 darkTheme = true; ApplyTheme();
@@ -278,7 +279,9 @@ internal sealed class MainWindow : Form
             grid.Rows.Clear();
             foreach (var row in snapshot.GetProperty(name).EnumerateArray())
             {
-                var values = grid.Columns.Cast<DataGridViewColumn>().Select(c => row.TryGetProperty(c.Name, out var value) ? value.ToString() : "").Cast<object>().ToArray();
+                var values = grid.Columns.Cast<DataGridViewColumn>().Select(c => row.TryGetProperty(c.Name, out var value)
+                    ? c.Name == "priceMinor" ? (value.GetInt64() / 100m).ToString("0.00")
+                    : c.Name == "active" ? (value.GetInt64() == 1 ? "Да" : "Нет") : value.ToString() : "").Cast<object>().ToArray();
                 var index = grid.Rows.Add(values);
                 if (Convert.ToString(values[0]) == selected) grid.Rows[index].Selected = true;
             }
@@ -373,7 +376,20 @@ internal sealed class MainWindow : Form
     }
     private Task AddComputer() { var v = Ask("Новое место", "Название"); return v is null ? Task.CompletedTask : Mutate("/api/admin/computers", new { name = v[0], operationId = Guid.NewGuid() }); }
     private Task TopUp() { var customer = Selected("customers"); var v = Ask("Пополнение выбранного посетителя", "Сумма в тыйынах", "Способ: Cash или Transfer"); return v is null ? Task.CompletedTask : Mutate("/api/admin/topups", new { customerId = customer, amountMinor = long.Parse(v[0]), method = v[1], operationId = Guid.NewGuid() }); }
-    private Task Package() { var v = Ask("Новый пакет", "Название", "Минуты", "Цена в тыйынах"); return v is null ? Task.CompletedTask : Mutate("/api/admin/packages", new { name = v[0], minutes = int.Parse(v[1]), priceMinor = long.Parse(v[2]), active = true, operationId = Guid.NewGuid() }); }
+    private Task Package(bool edit)
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        string? id = edit ? Selected("packages") : null;
+        var row = edit ? snapshot.GetProperty("packages").EnumerateArray().Single(p => p.GetProperty("id").GetString() == id) : default;
+        using var dialog = new PackageEditor(darkTheme, id,
+            edit ? row.GetProperty("name").GetString()! : "",
+            edit ? row.GetProperty("minutes").GetInt32() : 60,
+            edit ? row.GetProperty("priceMinor").GetInt64() : 10000,
+            !edit || row.GetProperty("active").GetInt64() == 1);
+        return dialog.ShowDialog(this) == DialogResult.OK
+            ? Mutate("/api/admin/packages", dialog.Result!) : Task.CompletedTask;
+    }
+
     private Task Session(string action) { var id = Selected("sessions"); var v = Ask("Управление сеансом", "Причина"); return v is null ? Task.CompletedTask : Mutate($"/api/admin/sessions/{id}/{action}", new { reason = v[0], operationId = Guid.NewGuid() }); }
     private Task FreeSession() { var customer = Selected("customers"); var computer = Selected("computers"); var v = Ask("Бесплатное время для выбранных посетителя и ПК", "Минуты", "Причина"); return v is null ? Task.CompletedTask : Mutate("/api/admin/free-sessions", new { customerId = customer, computerId = computer, minutes = int.Parse(v[0]), reason = v[1], operationId = Guid.NewGuid() }); }
     private Task Refund() { var id = Selected("sessions"); var v = Ask("Ручной возврат за выбранный сеанс", "Сумма в тыйынах", "Способ: Cash или Transfer", "Причина"); return v is null ? Task.CompletedTask : Mutate("/api/admin/refunds", new { sessionId = id, amountMinor = long.Parse(v[0]), method = v[1], reason = v[2], operationId = Guid.NewGuid() }); }
@@ -407,6 +423,69 @@ internal sealed class MainWindow : Form
         return dialog.ShowDialog(this) == DialogResult.OK ? entries.Select(x => x.Text.Trim()).ToArray() : null;
     }
     private sealed record Pending(string UserId, string Path, string Json);
+}
+
+internal sealed record PackageDraft(string? Id, string Name, int Minutes, long PriceMinor, bool Active, string OperationId);
+
+internal sealed class PackageEditor : Form
+{
+    private readonly TextBox name = new() { MaxLength = 80, Width = 420 };
+    private readonly NumericUpDown minutes = new() { Minimum = 1, Maximum = 1440, Width = 180 };
+    private readonly NumericUpDown price = new() { Minimum = 0.01m, Maximum = 1_000_000m, DecimalPlaces = 2, Increment = 1, Width = 180 };
+    private readonly CheckBox active = new() { Text = "Доступен для новых покупок", AutoSize = true };
+    private readonly Button save = new() { Text = "Сохранить", AutoSize = true };
+    public PackageDraft? Result { get; private set; }
+
+    public PackageEditor(bool dark, string? id, string title, int duration, long amount, bool enabled)
+    {
+        Text = id is null ? "Новый тариф" : "Изменение тарифа";
+        ClientSize = new Size(500, 410); Font = new Font("Segoe UI", 11);
+        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16) };
+        name.Text = title; minutes.Value = duration; price.Value = amount / 100m; active.Checked = enabled;
+        layout.Controls.AddRange([new Label { Text = "Название", AutoSize = true }, name,
+            new Label { Text = "Длительность, минуты", AutoSize = true }, minutes,
+            new Label { Text = "Цена, сом", AutoSize = true }, price, active,
+            new Label { Text = "Изменения действуют на новые покупки.\nУсловия уже купленных сеансов сохраняются.", AutoSize = true }]);
+        var buttons = new FlowLayoutPanel { AutoSize = true };
+        var cancel = new Button { Text = "Отмена", DialogResult = DialogResult.Cancel, AutoSize = true };
+        buttons.Controls.AddRange([save, cancel]); layout.Controls.Add(buttons); Controls.Add(layout);
+        AcceptButton = save; CancelButton = cancel;
+        save.Enabled = !string.IsNullOrWhiteSpace(name.Text);
+        name.TextChanged += (_, _) => save.Enabled = !string.IsNullOrWhiteSpace(name.Text);
+        save.Click += (_, _) =>
+        {
+            // Commit pending numeric text before reading Values, including keyboard submission.
+            ValidateChildren();
+            Result = new(id, name.Text.Trim(), (int)minutes.Value, checked((long)(price.Value * 100)), active.Checked, Guid.NewGuid().ToString());
+            DialogResult = DialogResult.OK;
+        };
+        DesktopTheme.Apply(this, dark);
+    }
+
+    public static void Smoke()
+    {
+        foreach (var dark in new[] { true, false })
+        {
+            using var dialog = new PackageEditor(dark, "existing-id", "Прежний тариф", 60, 12345, true);
+            dialog.Shown += (_, _) => dialog.BeginInvoke(() =>
+            {
+                if (dialog.price.Value != 123.45m) throw new InvalidOperationException("Incorrect tariff amount.");
+                dialog.name.Text = " ";
+                if (dialog.save.Enabled) throw new InvalidOperationException("Blank tariff name accepted.");
+                dialog.name.Text = "Новый тариф"; dialog.minutes.Value = 90; dialog.price.Value = 199.99m; dialog.active.Checked = false;
+                var output = Path.Combine(Environment.CurrentDirectory, "artifacts", "ui");
+                Directory.CreateDirectory(output);
+                using var image = new Bitmap(dialog.Width, dialog.Height);
+                dialog.DrawToBitmap(image, new Rectangle(Point.Empty, dialog.Size));
+                image.Save(Path.Combine(output, $"Package-{(dark ? "dark" : "light")}.png"));
+                dialog.save.PerformClick();
+            });
+            if (dialog.ShowDialog() != DialogResult.OK || dialog.Result is not { Id: "existing-id", Name: "Новый тариф", Minutes: 90, PriceMinor: 19999, Active: false })
+                throw new InvalidOperationException("Tariff editor did not preserve ID, price or availability.");
+        }
+    }
 }
 
 internal static class GridExtensions
