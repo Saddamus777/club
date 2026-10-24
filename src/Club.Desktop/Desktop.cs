@@ -458,7 +458,7 @@ internal sealed class PackageEditor : Form
         {
             // Commit pending numeric text before reading Values, including keyboard submission.
             ValidateChildren();
-            Result = new(id, name.Text.Trim(), (int)minutes.Value, checked((long)(price.Value * 100)), active.Checked, Guid.NewGuid().ToString());
+            Result = new(id, name.Text.Trim(), (int)minutes.Value, checked((long)(decimal.Round(price.Value, 2, MidpointRounding.ToEven) * 100)), active.Checked, Guid.NewGuid().ToString());
             DialogResult = DialogResult.OK;
         };
         DesktopTheme.Apply(this, dark);
@@ -474,7 +474,7 @@ internal sealed class PackageEditor : Form
                 if (dialog.price.Value != 123.45m) throw new InvalidOperationException("Incorrect tariff amount.");
                 dialog.name.Text = " ";
                 if (dialog.save.Enabled) throw new InvalidOperationException("Blank tariff name accepted.");
-                dialog.name.Text = "Новый тариф"; dialog.minutes.Value = 90; dialog.price.Value = 199.99m; dialog.active.Checked = false;
+                dialog.name.Text = "Новый тариф"; dialog.minutes.Value = 90; dialog.price.Value = dark ? 199.99m : 199.999m; dialog.active.Checked = false;
                 var output = Path.Combine(Environment.CurrentDirectory, "artifacts", "ui");
                 Directory.CreateDirectory(output);
                 using var image = new Bitmap(dialog.Width, dialog.Height);
@@ -482,7 +482,7 @@ internal sealed class PackageEditor : Form
                 image.Save(Path.Combine(output, $"Package-{(dark ? "dark" : "light")}.png"));
                 dialog.save.PerformClick();
             });
-            if (dialog.ShowDialog() != DialogResult.OK || dialog.Result is not { Id: "existing-id", Name: "Новый тариф", Minutes: 90, PriceMinor: 19999, Active: false })
+            if (dialog.ShowDialog() != DialogResult.OK || dialog.Result is not { Id: "existing-id", Name: "Новый тариф", Minutes: 90, Active: false } || dialog.Result.PriceMinor != (dark ? 19999 : 20000))
                 throw new InvalidOperationException("Tariff editor did not preserve ID, price or availability.");
         }
     }
