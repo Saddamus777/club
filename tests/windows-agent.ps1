@@ -99,6 +99,21 @@ try {
     $attemptedInstall = $true
     & (Join-Path $setup 'Install-Agent.ps1') -BindingFile (Join-Path $work 'test.binding.json') `
         -ServerUrl ('https://localhost:' + $port) -VisitorUser $visitor.Name -ServerCertificate $cer -CertificateThumbprint $cert.Thumbprint
+    $export = Join-Path $work 'kiosk-empty'
+    & (Join-Path $setup 'Export-KioskDraft.ps1') -OutputDirectory $export
+    $readiness = Read-Json (Join-Path $export 'readiness.json')
+    [xml]$draft = Get-Content -LiteralPath (Join-Path $export 'assigned-access.draft.xml') -Raw
+    if ($readiness.visitorSid -ne $visitor.SID.Value -or $readiness.policyApplied -or $readiness.readyForOperation -or
+        -not ($readiness.checks | Where-Object id -eq 'visitorStartup').passed -or
+        -not ($readiness.checks | Where-Object id -eq 'agentRunning').passed -or
+        @($draft.AssignedAccessConfiguration.Profiles.Profile.AllAppsList.AllowedApps.App).Count -ne 1) { throw 'Incorrect initial workstation report or empty-catalog draft.' }
+    if ((Get-CimInstance Win32_OperatingSystem).ProductType -ne 1 -and
+        (($readiness.checks | Where-Object id -eq 'windows11').passed -or $readiness.setupPrerequisitesPassed)) { throw 'Server OS was declared eligible for the Windows 11 Pro trial.' }
+    if ((Get-Content -LiteralPath (Join-Path $export 'readiness.json') -Raw).Contains($key)) { throw 'Device key leaked into readiness export.' }
+    $hashBefore = (Get-FileHash (Join-Path $export 'assigned-access.draft.xml')).Hash
+    $rejected = $false
+    try { & (Join-Path $setup 'Export-KioskDraft.ps1') -OutputDirectory $export } catch { $rejected = $true }
+    if (-not $rejected -or (Get-FileHash (Join-Path $export 'assigned-access.draft.xml')).Hash -ne $hashBefore) { throw 'Existing export was replaced.' }
     # Credential probes must not race an automatically opened Visitor for the single pipe.
     Disable-ScheduledTask -TaskName ClubVisitor -TaskPath '\' | Out-Null
     Wait-Until { (Test-Path (Join-Path $work 'report.json')) -and (Test-Path (Join-Path $data 'session.json')) } 'No authenticated HTTPS heartbeat/checkpoint.'
@@ -109,6 +124,13 @@ try {
     ConvertTo-Json -InputObject @(@{ id = 'sample'; name = 'CI sample'; executable = (Join-Path $programRoot 'Visitor\Club.Visitor.exe'); arguments = @() }) -Depth 4 |
         Set-Content $catalog -Encoding UTF8
     & (Join-Path $setup 'Set-Games.ps1') -CatalogFile $catalog
+    $export = Join-Path $work 'kiosk-catalog'
+    & (Join-Path $setup 'Export-KioskDraft.ps1') -OutputDirectory $export
+    $readiness = Read-Json (Join-Path $export 'readiness.json')
+    if (($readiness.checks | Where-Object id -eq 'visitorStartup').passed -or (Test-Path (Join-Path $export 'request.tmp.json'))) {
+        throw 'Disabled startup was missed or temporary export request was retained.'
+    }
+    Write-Host 'PASS: installed workstation inspection, empty/populated catalog export, disabled startup detected, Server OS rejected for Windows 11 trial, existing export preserved. No policy applied.'
     $beforeCatalog = (Get-FileHash (Join-Path $data 'games.json')).Hash
     'not json' | Set-Content (Join-Path $work 'bad-games.json') -Encoding UTF8
     $rejected = $false

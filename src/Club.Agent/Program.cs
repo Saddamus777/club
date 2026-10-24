@@ -2,6 +2,28 @@ using System.Text.Json;
 using Club.Agent;
 using Club.Protocol;
 
+if (args.Length == 3 && args[0] == "--export-kiosk-draft")
+{
+    try
+    {
+        var input = new FileInfo(args[1]);
+        if (input.Length > 524288) throw new InvalidDataException("Draft request is too large.");
+        var request = JsonSerializer.Deserialize<KioskDraftRequest>(File.ReadAllText(input.FullName), ApiClient.Json)
+            ?? throw new InvalidDataException("Missing draft request.");
+        var xml = KioskDraft.Create(request);
+        foreach (var path in new[] { request.VisitorExecutable }.Concat(request.Games.Select(g => g.Executable)))
+            if (!File.Exists(path)) throw new FileNotFoundException("Draft executable not found: " + path);
+        // No configuration or secret is read, and an existing output is never replaced.
+        using var output = new FileStream(args[2], FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        using var writer = new StreamWriter(output, new System.Text.UTF8Encoding(false));
+        writer.Write(xml);
+        Console.WriteLine("Assigned Access draft exported. No Windows policy was applied.");
+    }
+    catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException or UnauthorizedAccessException or ArgumentException)
+    { Console.WriteLine("Draft rejected: " + ex.Message); Environment.ExitCode = 1; }
+    return;
+}
+
 if (args.Length == 2 && args[0] == "--validate-games")
 {
     try

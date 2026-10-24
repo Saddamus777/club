@@ -13,6 +13,7 @@ mkdir -p "$staging/Setup"
 cp scripts/pilot/*.ps1 "$staging/Setup/"
 cp docs/windows-pilot.md "$staging/READ-ME.md"
 cp docs/validation.md "$staging/validation.md"
+cp docs/windows-kiosk.md "$staging/windows-kiosk.md"
 printf '0.2.0-pilot - Windows runtime validation required\n' > "$staging/VERSION.txt"
 python3 - "$staging" <<'PY'
 from pathlib import Path
