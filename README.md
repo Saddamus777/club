@@ -48,10 +48,10 @@ LAN включается явно: конкретный IP, HTTPS, сертиф�
 [Пошаговая инструкция Windows/LAN](docs/windows-pilot.md) ·
 [Требования и этапы](docs/specification.md) · [Фактические проверки](docs/validation.md).
 
-[Скачать тестовый комплект 0.2 для Windows x64](https://github.com/Saddamus777/club/actions/runs/40121885593/artifacts/12570729702)
-(нужен вход в GitHub; артефакт хранится до 8 ноября 2026, 00:45 Asia/Bishkek).
-[Успешный Windows/Linux прогон](https://github.com/Saddamus777/club/actions/runs/40121885593):
-69 тестов на каждой ОС, сборка и запуск обоих окон, проверка формы редактирования тарифов,
+[Скачать тестовый комплект 0.2 для Windows x64](https://github.com/Saddamus777/club/actions/runs/40142704540/artifacts/12579268220)
+(нужен вход в GitHub; артефакт хранится до 8 ноября 2026, 05:29 Asia/Bishkek).
+[Успешный Windows/Linux прогон](https://github.com/Saddamus777/club/actions/runs/40142704540):
+90 тестов на каждой ОС, сборка и запуск обоих окон, проверка форм тарифов, пополнения и возврата,
 экспорта XML-черновика и отчёта подготовки Windows 11 Pro. Политика не применялась.
 На Windows Server 2025 также
 проверены установка/удаление настоящей службы, права обычных пользователей, каталог,
