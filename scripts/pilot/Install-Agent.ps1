@@ -8,6 +8,7 @@ param(
     [Parameter(Mandatory)][string]$CertificateThumbprint
 )
 $ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'Verify-AgentPayload.ps1') -PayloadRoot (Join-Path $PSScriptRoot '..')
 . (Join-Path $PSScriptRoot 'VisitorStartup.ps1')
 if (Get-ScheduledTask -TaskName 'ClubVisitor' -TaskPath '\' -ErrorAction SilentlyContinue) { throw 'ClubVisitor startup task already exists. Inspect it before installing.' }
 $serverUri = [Uri]$ServerUrl
@@ -57,6 +58,7 @@ New-ProtectedDirectory $dataRoot $false
 New-ProtectedDirectory $data $false
 Copy-Item -Path (Join-Path $PSScriptRoot '..\Agent') -Destination $root -Recurse -Force
 Copy-Item -Path (Join-Path $PSScriptRoot '..\Visitor') -Destination $root -Recurse -Force
+& (Join-Path $PSScriptRoot 'Verify-AgentPayload.ps1') -PayloadRoot $root -ManifestPath (Join-Path $PSScriptRoot '..\agent-payload.json')
 $config = @{ serverUrl = $ServerUrl; computerId = $binding.computerId; token = $binding.token; visitorSid = $visitor.SID.Value }
 $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $data 'agent.json') -Encoding UTF8
 if (-not (Test-Path (Join-Path $data 'games.json'))) {

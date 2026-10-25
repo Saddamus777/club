@@ -44,6 +44,12 @@ jobs:
           Copy-Item docs/windows-pilot.md artifacts/pilot/READ-ME.md
           Copy-Item docs/validation.md artifacts/pilot/validation.md
           Copy-Item docs/windows-kiosk.md artifacts/pilot/windows-kiosk.md
+          python scripts/write-agent-manifest.py artifacts/pilot
+          if ($LASTEXITCODE -ne 0) { throw "Manifest generation failed" }
+      - name: Verify Agent and Visitor payload integrity
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/windows-payload.ps1
       - name: Verify visitor startup task and game catalog on Windows
         if: runner.os == 'Windows'
         shell: powershell
