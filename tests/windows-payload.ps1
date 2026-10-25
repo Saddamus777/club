@@ -9,10 +9,17 @@ function Must-Reject {
 try {
     New-Item -ItemType Directory -Path (Join-Path $work 'Agent'), (Join-Path $work 'Visitor') | Out-Null
     'agent fixture' | Set-Content (Join-Path $work 'Agent\Club.Agent.exe')
+    New-Item -ItemType Directory -Path (Join-Path $work 'Agent\nested folder') | Out-Null
+    'nested fixture' | Set-Content (Join-Path $work 'Agent\nested folder\library.dll')
     'visitor fixture' | Set-Content (Join-Path $work 'Visitor\Club.Visitor.exe')
     python scripts/write-agent-manifest.py $work
     if ($LASTEXITCODE -ne 0) { throw 'Manifest fixture failed.' }
     & $verify -PayloadRoot $work
+    # CI TEMP may contain RUNNER~1: enumeration expands the alias to a longer path.
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    $shortRoot = $fso.GetFolder($work).ShortPath
+    & $verify -PayloadRoot $shortRoot
+    & $verify -PayloadRoot ($work + '\')
     $exe = Join-Path $work 'Agent\Club.Agent.exe'
     $original = [IO.File]::ReadAllBytes($exe)
     $changed = [byte[]]$original.Clone(); $changed[0] = $changed[0] -bxor 1

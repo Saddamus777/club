@@ -17,13 +17,17 @@ foreach ($component in @('Agent','Visitor')) {
     $folder = Get-Item -LiteralPath (Join-Path $root $component)
     if ($folder.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Payload links are forbidden.' }
     # Inspect directories before recursing so a junction is never followed.
-    $pending = New-Object 'System.Collections.Generic.Queue[string]'
-    $pending.Enqueue($folder.FullName)
+    $pending = New-Object 'System.Collections.Generic.Queue[object]'
+    $pending.Enqueue(@{ FullName = $folder.FullName; Relative = $component })
     while ($pending.Count -gt 0) {
-        foreach ($item in Get-ChildItem -LiteralPath $pending.Dequeue() -Force) {
+        $directory = $pending.Dequeue()
+        foreach ($item in Get-ChildItem -LiteralPath $directory.FullName -Force) {
             if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Payload links are forbidden.' }
-            if ($item.PSIsContainer) { $pending.Enqueue($item.FullName); continue }
-            $relative = $item.FullName.Substring($root.TrimEnd('\').Length + 1).Replace('\','/')
+            $relative = $directory.Relative + '/' + $item.Name
+            if ($item.PSIsContainer) {
+                $pending.Enqueue(@{ FullName = $item.FullName; Relative = $relative })
+                continue
+            }
             if (-not $expected.Contains($relative)) { throw ('Unexpected payload file: ' + $relative) }
         }
     }
