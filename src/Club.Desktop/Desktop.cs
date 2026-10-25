@@ -156,6 +156,7 @@ internal sealed class MainWindow : Form
         Button("Войти", Login);
         Button(Staff ? "Создать владельца" : "Регистрация", Register);
         Button("Обновить", RefreshState);
+        Button("Сменить пароль", ChangePassword);
         Button("Повторить незавершённый запрос", RetryPending);
         Button("Выйти", async () => { await transport.Request("/api/logout", new { }); loggedIn = false; if (createStaffButton is not null) createStaffButton.Visible = false; snapshot = default; foreach (var grid in grids.Values) grid.Rows.Clear(); status.Text = "Вы вышли из аккаунта."; });
         if (Staff)
@@ -310,6 +311,25 @@ internal sealed class MainWindow : Form
         if (Staff ? role is not ("Owner" or "Admin") : role != "Customer")
         { await transport.Request("/api/logout", new { }); throw new InvalidOperationException("Этот аккаунт предназначен для другого приложения."); }
         loggedIn = true; await RefreshState();
+    }
+    private async Task ChangePassword()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        if (File.Exists(pendingFile)) throw new InvalidOperationException("Сначала завершите повтор незавершённой операции.");
+        var values = Ask("Смена пароля", "Текущий пароль", "Новый пароль", "Повтор нового пароля");
+        if (values is null) return;
+        if (values[1].Length is < 10 or > 128 || values[1] != values[2]) throw new InvalidOperationException("Новый пароль: 10–128 символов; повтор должен совпадать.");
+        try
+        {
+            // Passwords never enter the durable pending-operation file.
+            await transport.Request("/api/password", new { currentPassword = values[0], newPassword = values[1], confirmPassword = values[2] });
+        }
+        catch (Exception ex) when (ex is IOException or HttpRequestException or OperationCanceledException)
+        { throw new IOException("Ответ не получен. Пароль мог измениться: войдите с новым паролем для проверки.", ex); }
+        loggedIn = false; snapshot = default;
+        if (createStaffButton is not null) createStaffButton.Visible = false;
+        foreach (var grid in grids.Values) grid.Rows.Clear();
+        status.Text = "Пароль изменён. Все прежние входы отозваны. Войдите с новым паролем.";
     }
     private async Task Register()
     {

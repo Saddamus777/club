@@ -52,7 +52,8 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     options.Events.OnValidatePrincipal = context =>
     {
         var id = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (id is null || context.HttpContext.RequestServices.GetRequiredService<ClubStore>().FindAccount(id) is null) context.RejectPrincipal();
+        var account = id is null ? null : context.HttpContext.RequestServices.GetRequiredService<ClubStore>().FindAccount(id);
+        if (account is null || context.Principal?.FindFirstValue("credentialStamp") != ClubStore.CredentialStamp(account)) context.RejectPrincipal();
         return Task.CompletedTask;
     };
 });
@@ -184,7 +185,7 @@ app.MapPost("/api/login", async (RegisterRequest request, HttpContext context) =
         throw new RuleException("Вход сотрудника доступен только на ПК администратора.", 403);
     var identity = new ClaimsIdentity(new[]
     {
-        new Claim(ClaimTypes.NameIdentifier, account.Id), new Claim(ClaimTypes.Name, account.Username), new Claim(ClaimTypes.Role, account.Role)
+        new Claim(ClaimTypes.NameIdentifier, account.Id), new Claim(ClaimTypes.Name, account.Username), new Claim(ClaimTypes.Role, account.Role), new Claim("credentialStamp", ClubStore.CredentialStamp(account))
     }, CookieAuthenticationDefaults.AuthenticationScheme);
     await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity));
     return Results.Ok(new { account.Username, account.Role });
@@ -194,6 +195,12 @@ app.MapPost("/api/logout", async (HttpContext context) =>
     await context.SignOutAsync();
     return Results.Ok();
 }).RequireAuthorization();
+app.MapPost("/api/password", async (HttpContext context, PasswordChangeRequest request) =>
+{
+    store.ChangePassword(Id(context.User), request);
+    await context.SignOutAsync();
+    return Results.Ok(new { changed = true });
+}).RequireAuthorization().RequireRateLimiting("auth");
 app.MapGet("/api/state", (ClaimsPrincipal user) => store.Snapshot(Id(user))).RequireAuthorization();
 app.MapPost("/api/purchases", (ClaimsPrincipal user, PurchaseRequest request, HttpContext context) => store.Purchase(Id(user), request, context.Request.Headers["X-Club-Device"])).RequireAuthorization("Customer");
 var admin = app.MapGroup("/api/admin").RequireAuthorization("Staff");

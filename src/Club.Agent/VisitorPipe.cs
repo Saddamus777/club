@@ -58,7 +58,7 @@ public sealed class VisitorPipe(AgentConfiguration configuration, AgentRuntime r
                 else
                 {
                     var allowed = request.Json is null ? request.Path is "/api/state" or "/api/security"
-                        : request.Path is "/api/login" or "/api/register" or "/api/logout" or "/api/purchases";
+                        : request.Path is "/api/login" or "/api/register" or "/api/logout" or "/api/purchases" or "/api/password";
                     if (!allowed) throw new UnauthorizedAccessException();
                     if (request.Path == "/api/purchases")
                     {

@@ -214,6 +214,28 @@ public sealed class ApiTests
     }
 
     [Fact]
+    public async Task PasswordChangeRejectsOldPasswordAndAllPreviousCookies()
+    {
+        await using var factory = new ApiFactory();
+        factory.Services.GetRequiredService<ClubStore>().CreateAccount("owner", Password, "Owner");
+        using var first = factory.CreateClient(); using var second = factory.CreateClient();
+        await Login(first, "owner"); await Login(second, "owner");
+        var bad = await first.PostAsJsonAsync("/api/password", new PasswordChangeRequest("wrong", " changed-password-123 ", " changed-password-123 "));
+        Assert.Equal(HttpStatusCode.Forbidden, bad.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await second.GetAsync("/api/state")).StatusCode);
+        var change = await first.PostAsJsonAsync("/api/password", new PasswordChangeRequest(Password, " changed-password-123 ", " changed-password-123 "));
+        change.EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await first.GetAsync("/api/state")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await second.GetAsync("/api/state")).StatusCode);
+        await Token(first);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await first.PostAsJsonAsync("/api/login", new { username = "owner", password = Password })).StatusCode);
+        (await first.PostAsJsonAsync("/api/login", new { username = "owner", password = " changed-password-123 " })).EnsureSuccessStatusCode();
+        var state = await first.GetFromJsonAsync<JsonElement>("/api/state");
+        Assert.DoesNotContain("changed-password", state.ToString());
+        Assert.Contains(state.GetProperty("audit").EnumerateArray(), row => row.GetProperty("action").GetString() == "PasswordChanged");
+    }
+
+    [Fact]
     public async Task LoginErrorsAndRateLimitDoNotLeakAccounts()
     {
         await using var factory = new ApiFactory();

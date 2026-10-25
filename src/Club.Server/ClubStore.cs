@@ -80,6 +80,25 @@ public sealed partial class ClubStore : IDisposable
     public bool VerifyPassword(Account account, string password) => password.Length <= 128 &&
         passwords.VerifyHashedPassword(account, account.PasswordHash, password) != PasswordVerificationResult.Failed;
 
+    public static string CredentialStamp(Account account) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(account.PasswordHash)));
+
+    public void ChangePassword(string actor, PasswordChangeRequest request)
+    {
+        if (request.NewPassword is null || request.NewPassword.Length is < 10 or > 128 || request.NewPassword != request.ConfirmPassword)
+            throw new RuleException("Новый пароль: 10–128 символов; повтор должен совпадать.");
+        lock (gate)
+        {
+            using var db = Open(path);
+            using var tx = db.BeginTransaction();
+            var account = ReadAccount(db, tx, actor) ?? throw new RuleException("Войдите снова.", 401);
+            if (!VerifyPassword(account, request.CurrentPassword ?? "")) throw new RuleException("Неверный текущий пароль.", 403);
+            var hash = passwords.HashPassword(account, request.NewPassword);
+            Execute(db, tx, "UPDATE Accounts SET PasswordHash=$1 WHERE Id=$0", actor, hash);
+            Audit(db, tx, actor, "PasswordChanged", actor, "Пароль изменён; прежние входы отозваны.");
+            tx.Commit();
+        }
+    }
+
     public bool HasOwner()
     {
         lock (gate)

@@ -1,6 +1,7 @@
 namespace Club.Server;
 
 public sealed record Account(string Id, string Username, string Role, string PasswordHash, long BalanceMinor);
+public sealed record PasswordChangeRequest(string CurrentPassword, string NewPassword, string ConfirmPassword);
 public sealed record RegisterRequest(string Username, string Password);
 public sealed record OwnerSetupRequest(string Username, string Password, string ConfirmPassword);
 public sealed record ComputerRequest(string Name, string OperationId);
