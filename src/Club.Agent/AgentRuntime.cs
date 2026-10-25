@@ -32,16 +32,9 @@ public sealed class AgentRuntime
             return current;
         }
     }
-    private void Save()
-    {
-        var temp = checkpoint + ".tmp";
-        using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
-        {
-            JsonSerializer.Serialize(file, clock.Current, ApiClient.Json);
-            file.Flush(true);
-        }
-        File.Move(temp, checkpoint, true);
-    }
+    private void Save() => CheckpointFile.Write(checkpoint,
+        file => JsonSerializer.Serialize(file, clock.Current, ApiClient.Json));
+
 }
 
 public sealed class AgentWorker(AgentRuntime runtime, AgentConfiguration configuration, ILogger<AgentWorker> logger) : BackgroundService
