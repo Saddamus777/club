@@ -4,7 +4,7 @@ namespace Club.Server;
 
 public static class Database
 {
-    public const int Version = 2;
+    public const int Version = 3;
     public static SqliteConnection Open(string path, bool readOnly = false)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -68,7 +68,7 @@ public static class Database
               Fingerprint TEXT NOT NULL, ResultJson TEXT NOT NULL, CreatedMs INTEGER NOT NULL);
             PRAGMA user_version=1;
             """);
-        Execute(c, tx, """
+        if (version < 2) Execute(c, tx, """
             CREATE TABLE Devices(ComputerId TEXT PRIMARY KEY REFERENCES Computers(Id), TokenHash TEXT NOT NULL,
               BootId TEXT, Sequence INTEGER NOT NULL DEFAULT 0, LastSeenMs INTEGER NOT NULL DEFAULT 0);
             ALTER TABLE Sessions ADD COLUMN Managed INTEGER NOT NULL DEFAULT 0 CHECK(Managed IN (0,1));
@@ -80,6 +80,7 @@ public static class Database
             CREATE UNIQUE INDEX OneActiveCustomer ON Sessions(CustomerId) WHERE Status IN ('Running','Paused') OR (Managed=1 AND AckRevision<Revision);
             PRAGMA user_version=2;
             """);
+        Execute(c, tx, "ALTER TABLE Accounts ADD COLUMN Disabled INTEGER NOT NULL DEFAULT 0 CHECK(Disabled IN (0,1)); ALTER TABLE Accounts ADD COLUMN AuthRevision INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=3;");
         tx.Commit();
     }
 
@@ -97,7 +98,8 @@ public static class Database
             SELECT COUNT(*) FROM Accounts a WHERE a.BalanceMinor !=
               COALESCE((SELECT SUM(WalletDelta) FROM Ledger l WHERE l.CustomerId=a.Id),0)
             """) != 0) throw new InvalidDataException("Баланс не сходится с журналом операций.");
-        if (version == 2) _ = Number(db, null, "SELECT COUNT(*) FROM Devices");
+        if (version >= 2) _ = Number(db, null, "SELECT COUNT(*) FROM Devices");
+        if (version >= 3) _ = Number(db, null, "SELECT COUNT(*) FROM Accounts WHERE Disabled=0 AND AuthRevision>=0");
         // Require the rest of this application's schema even if an unrelated SQLite file declares version 1.
         foreach (var table in new[] { "Computers", "Packages", "Sessions", "Audit", "Commands" })
             _ = Number(db, null, $"SELECT COUNT(*) FROM {table}");

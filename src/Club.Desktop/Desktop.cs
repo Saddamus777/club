@@ -169,7 +169,9 @@ internal sealed class MainWindow : Form
             Button("Резервная копия", SaveBackup);
             createStaffButton = Button("Новый сотрудник", CreateStaff);
             createStaffButton.Visible = false;
-            Grid("employees", "Сотрудники (владелец)", ("id", "ID"), ("username", "Логин"), ("role", "Роль"));
+            Grid("employees", "Сотрудники (владелец)", ("id", "ID"), ("username", "Логин"), ("role", "Роль"), ("disabled", "Заблокирован"));
+            Button("Доступ сотрудника", () => ManageStaff(false));
+            Button("Сброс пароля сотрудника", () => ManageStaff(true));
         }
         else
         {
@@ -353,7 +355,7 @@ internal sealed class MainWindow : Form
             {
                 var values = grid.Columns.Cast<DataGridViewColumn>().Select(c => row.TryGetProperty(c.Name, out var value)
                     ? c.Name is "priceMinor" or "balanceMinor" or "availableRefundMinor" ? (object)(value.GetInt64() / 100m)
-                    : c.Name == "active" ? (value.GetInt64() == 1 ? "Да" : "Нет")
+                    : c.Name is "active" or "disabled" ? (value.GetInt64() == 1 ? "Да" : "Нет")
                     : c.Name == "role" ? (value.GetString() == "Owner" ? "Владелец" : "Администратор") : value.ToString() : "").Cast<object>().ToArray();
                 var index = grid.Rows.Add(values);
                 if (Convert.ToString(values[0]) == selected) grid.Rows[index].Selected = true;
@@ -497,6 +499,30 @@ internal sealed class MainWindow : Form
         await Mutate("/api/admin/refunds", new { sessionId = id, result.AmountMinor, result.Method, result.Reason, result.OperationId });
     }
     private Task Purchase() => Mutate("/api/purchases", new { packageId = Selected("packages"), operationId = Guid.NewGuid() });
+    private async Task ManageStaff(bool reset)
+    {
+        if (!loggedIn || snapshot.GetProperty("user").GetProperty("role").GetString() != "Owner") throw new InvalidOperationException("Доступно только владельцу.");
+        var id = Selected("employees");
+        var employee = snapshot.GetProperty("employees").EnumerateArray().Single(e => e.GetProperty("id").GetString() == id);
+        if (employee.GetProperty("role").GetString() != "Admin") throw new InvalidOperationException("Выберите сотрудника, не владельца.");
+        var title = employee.GetProperty("username").GetString();
+        if (reset)
+        {
+            var values = Ask("Сброс пароля: " + title, "Новый пароль", "Повтор пароля", "Причина");
+            if (values is null) return;
+            await transport.Request($"/api/admin/staff/{id}/password", new { newPassword = values[0], confirmPassword = values[1], reason = values[2] });
+        }
+        else
+        {
+            var disabled = employee.GetProperty("disabled").GetInt64() == 0;
+            var values = Ask((disabled ? "Заблокировать: " : "Разблокировать: ") + title, "Причина");
+            if (values is null) return;
+            await transport.Request($"/api/admin/staff/{id}/access", new { disabled, reason = values[0] });
+        }
+        await RefreshState();
+        status.Text = "Доступ сотрудника обновлён. Прежние входы отозваны.";
+    }
+
     private async Task CreateStaff()
     {
         if (!loggedIn || snapshot.GetProperty("user").GetProperty("role").GetString() != "Owner")

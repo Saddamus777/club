@@ -30,6 +30,26 @@ public sealed class StoreTests : IDisposable
         computer = store.AddComputer(owner, new("ПК-01", Key())).GetProperty("id").GetString()!;
         package = store.SavePackage(owner, new(null, "Три часа", 180, 30_000, true, Key())).GetProperty("id").GetString()!;
     }
+    [Fact]
+    public void VersionTwoUpgradePreservesBalancesAndBlockedStaffSurvivesBackupRestore()
+    {
+        TopUp(12345);
+        store.Dispose();
+        using (var db = Database.Open(Path.Combine(directory, "club.db")))
+            Database.Execute(db, null, "ALTER TABLE Accounts DROP COLUMN Disabled; ALTER TABLE Accounts DROP COLUMN AuthRevision; PRAGMA user_version=2;");
+        store = OpenStore();
+        Assert.Equal(12345, store.FindAccount(customer)!.BalanceMinor);
+        Assert.False(store.FindAccount(owner)!.Disabled);
+        var employee = store.CreateAccount("employee", Password, "Admin", owner);
+        store.ManageStaff(owner, employee.Id, new StaffAccessRequest(true, "Увольнение"), null);
+        var backup = store.Backup(owner);
+        store.Dispose(); Database.Restore(directory, backup); store = OpenStore();
+        Assert.True(store.FindAccount(employee.Id)!.Disabled);
+        Assert.Equal(1, store.FindAccount(employee.Id)!.AuthRevision);
+        Assert.Throws<RuleException>(() => store.TopUp(employee.Id, new(customer, 1, "Cash", Key())));
+        Assert.Equal(12345, store.FindAccount(customer)!.BalanceMinor);
+    }
+
     private ClubStore OpenStore() => new(directory, time, new PasswordHasher<Account>());
     private static string Key() => Guid.NewGuid().ToString();
     private void TopUp(long amount = 50_000) => store.TopUp(owner, new(customer, amount, "Cash", Key()));

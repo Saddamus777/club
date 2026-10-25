@@ -53,7 +53,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     {
         var id = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
         var account = id is null ? null : context.HttpContext.RequestServices.GetRequiredService<ClubStore>().FindAccount(id);
-        if (account is null || context.Principal?.FindFirstValue("credentialStamp") != ClubStore.CredentialStamp(account)) context.RejectPrincipal();
+        if (account is null || account.Disabled || context.Principal?.FindFirstValue("credentialStamp") != ClubStore.CredentialStamp(account)) context.RejectPrincipal();
         return Task.CompletedTask;
     };
 });
@@ -208,6 +208,14 @@ admin.MapPost("/staff", (ClaimsPrincipal user, RegisterRequest request) =>
 {
     var account = store.CreateAccount(request.Username ?? "", request.Password ?? "", "Admin", Id(user));
     return Results.Ok(new { account.Id, account.Username, account.Role });
+}).RequireAuthorization("Owner");
+admin.MapPost("/staff/{id}/access", (ClaimsPrincipal user, string id, StaffAccessRequest request) =>
+{
+    store.ManageStaff(Id(user), id, request, null); return Results.Ok();
+}).RequireAuthorization("Owner");
+admin.MapPost("/staff/{id}/password", (ClaimsPrincipal user, string id, StaffPasswordRequest request) =>
+{
+    store.ManageStaff(Id(user), id, null, request); return Results.Ok();
 }).RequireAuthorization("Owner");
 admin.MapPost("/devices", (ClaimsPrincipal user, DeviceBinding request) => store.BindDevice(Id(user), request));
 admin.MapPost("/computers", (ClaimsPrincipal user, ComputerRequest request) => store.AddComputer(Id(user), request));

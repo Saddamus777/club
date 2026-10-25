@@ -49,9 +49,9 @@ public sealed partial class ClubStore : IDisposable
     }
     private static Account? ReadAccount(SqliteConnection db, SqliteTransaction? tx, string value, bool byName = false)
     {
-        using var cmd = Command(db, tx, "SELECT Id,Username,Role,PasswordHash,BalanceMinor FROM Accounts WHERE " + (byName ? "Username" : "Id") + "=$0", value);
+        using var cmd = Command(db, tx, "SELECT Id,Username,Role,PasswordHash,BalanceMinor,Disabled,AuthRevision FROM Accounts WHERE " + (byName ? "Username" : "Id") + "=$0", value);
         using var reader = cmd.ExecuteReader();
-        return reader.Read() ? new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt64(4)) : null;
+        return reader.Read() ? new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt64(4), reader.GetInt64(5) == 1, reader.GetInt64(6)) : null;
     }
 
     public Account CreateAccount(string username, string password, string role = "Customer", string? actor = null)
@@ -77,10 +77,10 @@ public sealed partial class ClubStore : IDisposable
         return account;
     }
 
-    public bool VerifyPassword(Account account, string password) => password.Length <= 128 &&
+    public bool VerifyPassword(Account account, string password) => !account.Disabled && password.Length <= 128 &&
         passwords.VerifyHashedPassword(account, account.PasswordHash, password) != PasswordVerificationResult.Failed;
 
-    public static string CredentialStamp(Account account) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(account.PasswordHash)));
+    public static string CredentialStamp(Account account) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(account.PasswordHash + ":" + account.AuthRevision)));
 
     public void ChangePassword(string actor, PasswordChangeRequest request)
     {
@@ -95,6 +95,32 @@ public sealed partial class ClubStore : IDisposable
             var hash = passwords.HashPassword(account, request.NewPassword);
             Execute(db, tx, "UPDATE Accounts SET PasswordHash=$1 WHERE Id=$0", actor, hash);
             Audit(db, tx, actor, "PasswordChanged", actor, "Пароль изменён; прежние входы отозваны.");
+            tx.Commit();
+        }
+    }
+
+    public void ManageStaff(string actor, string target, StaffAccessRequest? access, StaffPasswordRequest? reset)
+    {
+        lock (gate)
+        {
+            using var db = Open(path);
+            using var tx = db.BeginTransaction();
+            RequireStaff(db, tx, actor, true);
+            var employee = ReadAccount(db, tx, target);
+            if (employee is not { Role: "Admin" } || actor == target) throw new RuleException("Выберите аккаунт сотрудника, не владельца.", 403);
+            var reason = Text(access?.Reason ?? reset?.Reason, 500);
+            if (access is not null)
+            {
+                Execute(db, tx, "UPDATE Accounts SET Disabled=$1,AuthRevision=AuthRevision+1 WHERE Id=$0", target, access.Disabled);
+                Audit(db, tx, actor, access.Disabled ? "StaffDisabled" : "StaffEnabled", target, reason);
+            }
+            else
+            {
+                if (reset?.NewPassword is null || reset.NewPassword.Length is < 10 or > 128 || reset.NewPassword != reset.ConfirmPassword)
+                    throw new RuleException("Новый пароль: 10–128 символов; повтор должен совпадать.");
+                Execute(db, tx, "UPDATE Accounts SET PasswordHash=$1,AuthRevision=AuthRevision+1 WHERE Id=$0", target, passwords.HashPassword(employee, reset.NewPassword));
+                Audit(db, tx, actor, "StaffPasswordReset", target, reason);
+            }
             tx.Commit();
         }
     }
@@ -310,7 +336,7 @@ public sealed partial class ClubStore : IDisposable
                     """);
             }
             var employees = account.Role == "Owner"
-                ? Rows(db, tx, "SELECT Id AS id,Username AS username,Role AS role FROM Accounts WHERE Role IN ('Owner','Admin') ORDER BY Username")
+                ? Rows(db, tx, "SELECT Id AS id,Username AS username,Role AS role,Disabled AS disabled FROM Accounts WHERE Role IN ('Owner','Admin') ORDER BY Username")
                 : [];
             tx.Commit();
             return new { nowMs = Now, user = new { account.Id, account.Username, account.Role, account.BalanceMinor }, computers, packages, sessions, customers, employees, report, audit, prototype = true };
@@ -370,7 +396,7 @@ public sealed partial class ClubStore : IDisposable
     private static void RequireStaff(SqliteConnection db, SqliteTransaction tx, string actor, bool ownerOnly = false)
     {
         var user = ReadAccount(db, tx, actor);
-        if (user is null || (ownerOnly ? user.Role != "Owner" : user.Role is not ("Owner" or "Admin"))) throw new RuleException("Недостаточно прав.", 403);
+        if (user is null || user.Disabled || (ownerOnly ? user.Role != "Owner" : user.Role is not ("Owner" or "Admin"))) throw new RuleException("Недостаточно прав.", 403);
     }
     private static Account RequireCustomer(SqliteConnection db, SqliteTransaction tx, string id)
     {

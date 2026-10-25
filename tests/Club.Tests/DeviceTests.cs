@@ -144,7 +144,7 @@ public sealed class DeviceTests : IDisposable
         var legacy = Path.Combine(directory, "legacy.db"); File.Copy(managedBackup, legacy);
         using (var db = Database.Open(legacy))
         {
-            Database.Execute(db, null, "DROP TABLE Devices; DROP INDEX OneActiveComputer; DROP INDEX OneActiveCustomer; ALTER TABLE Sessions DROP COLUMN Managed; ALTER TABLE Sessions DROP COLUMN AckRevision; ALTER TABLE Sessions DROP COLUMN Revision; CREATE UNIQUE INDEX OneActiveComputer ON Sessions(ComputerId) WHERE Status IN ('Running','Paused'); CREATE UNIQUE INDEX OneActiveCustomer ON Sessions(CustomerId) WHERE Status IN ('Running','Paused'); PRAGMA user_version=1;");
+            Database.Execute(db, null, "ALTER TABLE Accounts DROP COLUMN Disabled; ALTER TABLE Accounts DROP COLUMN AuthRevision; DROP TABLE Devices; DROP INDEX OneActiveComputer; DROP INDEX OneActiveCustomer; ALTER TABLE Sessions DROP COLUMN Managed; ALTER TABLE Sessions DROP COLUMN AckRevision; ALTER TABLE Sessions DROP COLUMN Revision; CREATE UNIQUE INDEX OneActiveComputer ON Sessions(ComputerId) WHERE Status IN ('Running','Paused'); CREATE UNIQUE INDEX OneActiveCustomer ON Sessions(CustomerId) WHERE Status IN ('Running','Paused'); PRAGMA user_version=1;");
         }
         Database.Verify(legacy);
         var restore = Path.Combine(directory, "restored"); Database.Restore(restore, legacy);

@@ -192,7 +192,7 @@ public sealed class ApiTests
         var state = await owner.GetFromJsonAsync<JsonElement>("/api/state");
         var employees = state.GetProperty("employees");
         Assert.Equal(2, employees.GetArrayLength());
-        Assert.All(employees.EnumerateArray(), employee => Assert.Equal(new[] { "id", "username", "role" }, employee.EnumerateObject().Select(p => p.Name)));
+        Assert.All(employees.EnumerateArray(), employee => Assert.Equal(new[] { "id", "username", "role", "disabled" }, employee.EnumerateObject().Select(p => p.Name)));
         Assert.Equal(HttpStatusCode.Conflict, (await owner.PostAsJsonAsync("/api/admin/staff", new { username = "employee", password = Password })).StatusCode);
     }
 
@@ -233,6 +233,29 @@ public sealed class ApiTests
         var state = await first.GetFromJsonAsync<JsonElement>("/api/state");
         Assert.DoesNotContain("changed-password", state.ToString());
         Assert.Contains(state.GetProperty("audit").EnumerateArray(), row => row.GetProperty("action").GetString() == "PasswordChanged");
+    }
+
+    [Fact]
+    public async Task OwnerCanRevokeStaffWithoutRevivingCookiesOnEnable()
+    {
+        await using var factory = new ApiFactory();
+        var store = factory.Services.GetRequiredService<ClubStore>();
+        var ownerId = store.CreateAccount("owner", Password, "Owner").Id;
+        var employee = store.CreateAccount("employee", Password, "Admin", ownerId);
+        using var owner = factory.CreateClient(); using var staff = factory.CreateClient();
+        await Login(owner, "owner"); await Login(staff, "employee");
+        Assert.Equal(HttpStatusCode.Forbidden, (await staff.PostAsJsonAsync($"/api/admin/staff/{ownerId}/access", new StaffAccessRequest(true, "deny"))).StatusCode);
+        (await owner.PostAsJsonAsync($"/api/admin/staff/{employee.Id}/access", new StaffAccessRequest(true, "Увольнение"))).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await staff.GetAsync("/api/state")).StatusCode);
+        using var attempt = factory.CreateClient(); await Token(attempt);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await attempt.PostAsJsonAsync("/api/login", new { username = "employee", password = Password })).StatusCode);
+        (await owner.PostAsJsonAsync($"/api/admin/staff/{employee.Id}/access", new StaffAccessRequest(false, "Возврат"))).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await staff.GetAsync("/api/state")).StatusCode);
+        (await owner.PostAsJsonAsync($"/api/admin/staff/{employee.Id}/password", new StaffPasswordRequest("new-password-123", "new-password-123", "Сброс"))).EnsureSuccessStatusCode();
+        await Token(attempt);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await attempt.PostAsJsonAsync("/api/login", new { username = "employee", password = Password })).StatusCode);
+        (await attempt.PostAsJsonAsync("/api/login", new { username = "employee", password = "new-password-123" })).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.Forbidden, (await owner.PostAsJsonAsync($"/api/admin/staff/{ownerId}/access", new StaffAccessRequest(true, "deny"))).StatusCode);
     }
 
     [Fact]
