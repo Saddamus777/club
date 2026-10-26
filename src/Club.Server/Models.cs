@@ -20,3 +20,5 @@ public sealed class RuleException(string message, int status = 400) : Exception(
 
 public sealed record StaffAccessRequest(bool Disabled, string Reason);
 public sealed record StaffPasswordRequest(string NewPassword, string ConfirmPassword, string Reason);
+
+public sealed record CustomerPasswordRequest(string NewPassword, string ConfirmPassword, string Reason);

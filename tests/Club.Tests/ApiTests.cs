@@ -258,6 +258,59 @@ public sealed class ApiTests
         Assert.Equal(HttpStatusCode.Forbidden, (await owner.PostAsJsonAsync($"/api/admin/staff/{ownerId}/access", new StaffAccessRequest(true, "deny"))).StatusCode);
     }
 
+    [Theory]
+    [InlineData("Owner")]
+    [InlineData("Admin")]
+    public async Task StaffCanRecoverCustomerPasswordWithoutChangingMoneyOrPaidSession(string actorRole)
+    {
+        await using var factory = new ApiFactory();
+        var store = factory.Services.GetRequiredService<ClubStore>();
+        var owner = store.CreateAccount("owner", Password, "Owner");
+        var employee = store.CreateAccount("employee", Password, "Admin", owner.Id);
+        var customer = store.CreateAccount("visitor", Password);
+        var pc = store.AddComputer(owner.Id, new("ПК", Guid.NewGuid().ToString())).GetProperty("id").GetString()!;
+        var tariff = store.SavePackage(owner.Id, new(null, "Час", 60, 10_000, true, Guid.NewGuid().ToString())).GetProperty("id").GetString()!;
+        store.TopUp(owner.Id, new(customer.Id, 50_000, "Cash", Guid.NewGuid().ToString()));
+        var session = store.Purchase(customer.Id, new(pc, tariff, Guid.NewGuid().ToString())).GetProperty("sessionId").GetString();
+        using var staff = factory.CreateClient(); using var first = factory.CreateClient(); using var second = factory.CreateClient();
+        await Login(staff, actorRole == "Owner" ? "owner" : "employee");
+        await Login(first, "visitor"); await Login(second, "visitor");
+        var path = $"/api/admin/customers/{customer.Id}/password";
+        var reset = new CustomerPasswordRequest(" recovered-password-789 ", " recovered-password-789 ", "Посетитель забыл пароль");
+        Assert.Equal(HttpStatusCode.Forbidden, (await first.PostAsJsonAsync(path, reset)).StatusCode);
+        foreach (var target in new[] { owner.Id, employee.Id, Guid.NewGuid().ToString() })
+            Assert.Equal(HttpStatusCode.NotFound, (await staff.PostAsJsonAsync($"/api/admin/customers/{target}/password", reset)).StatusCode);
+        var before = store.FindAccount(customer.Id)!;
+        foreach (var invalid in new[] { reset with { ConfirmPassword = "different" }, reset with { Reason = " " }, reset with { NewPassword = "short", ConfirmPassword = "short" } })
+            Assert.Equal(HttpStatusCode.BadRequest, (await staff.PostAsJsonAsync(path, invalid)).StatusCode);
+        staff.DefaultRequestHeaders.Remove("X-CSRF-TOKEN");
+        Assert.Equal(HttpStatusCode.BadRequest, (await staff.PostAsJsonAsync(path, reset)).StatusCode);
+        await Token(staff);
+        Assert.Equal(before.PasswordHash, store.FindAccount(customer.Id)!.PasswordHash);
+        Assert.Equal(HttpStatusCode.OK, (await second.GetAsync("/api/state")).StatusCode);
+        using var db = Database.Open(Path.Combine(factory.DirectoryPath, "club.db"));
+        using var commands = Database.Command(db, null, "SELECT COUNT(*) FROM Commands");
+        var commandCount = commands.ExecuteScalar();
+        (await staff.PostAsJsonAsync(path, reset)).EnsureSuccessStatusCode();
+        Assert.Equal(commandCount, commands.ExecuteScalar());
+        Assert.Equal(before.AuthRevision + 1, store.FindAccount(customer.Id)!.AuthRevision);
+        Assert.Equal(40_000, store.FindAccount(customer.Id)!.BalanceMinor);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await first.GetAsync("/api/state")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await second.GetAsync("/api/state")).StatusCode);
+        await Token(first);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await first.PostAsJsonAsync("/api/login", new { username = "visitor", password = Password })).StatusCode);
+        (await first.PostAsJsonAsync("/api/login", new { username = "visitor", password = reset.NewPassword })).EnsureSuccessStatusCode();
+        var state = await staff.GetFromJsonAsync<JsonElement>("/api/state");
+        var row = Assert.Single(state.GetProperty("sessions").EnumerateArray());
+        Assert.Equal(session, row.GetProperty("id").GetString());
+        Assert.Equal("Running", row.GetProperty("status").GetString());
+        Assert.Equal(10_000, state.GetProperty("report").GetProperty("purchasesMinor").GetInt64());
+        Assert.DoesNotContain("recovered-password", state.ToString());
+        var audit = Assert.Single(state.GetProperty("audit").EnumerateArray(), a => a.GetProperty("action").GetString() == "CustomerPasswordReset");
+        Assert.Equal(customer.Id, audit.GetProperty("targetId").GetString());
+        Assert.Equal(reset.Reason, audit.GetProperty("details").GetString());
+    }
+
     [Fact]
     public async Task LoginErrorsAndRateLimitDoNotLeakAccounts()
     {

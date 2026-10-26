@@ -167,6 +167,7 @@ internal sealed class MainWindow : Form
             Button("Пауза", () => Session("pause")); Button("Продолжить", () => Session("resume")); Button("Завершить", () => Session("end"));
             Button("Бесплатное время", FreeSession); Button("Возврат", Refund); Button("Привязать ПК", BindDevice);
             Button("Резервная копия", SaveBackup);
+            Button("Сброс пароля посетителя", ResetCustomerPassword);
             createStaffButton = Button("Новый сотрудник", CreateStaff);
             createStaffButton.Visible = false;
             Grid("employees", "Сотрудники (владелец)", ("id", "ID"), ("username", "Логин"), ("role", "Роль"), ("disabled", "Заблокирован"));
@@ -499,6 +500,24 @@ internal sealed class MainWindow : Form
         await Mutate("/api/admin/refunds", new { sessionId = id, result.AmountMinor, result.Method, result.Reason, result.OperationId });
     }
     private Task Purchase() => Mutate("/api/purchases", new { packageId = Selected("packages"), operationId = Guid.NewGuid() });
+    private async Task ResetCustomerPassword()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        var id = Selected("customers");
+        await RefreshState();
+        var customer = snapshot.GetProperty("customers").EnumerateArray().Single(c => c.GetProperty("id").GetString() == id);
+        var values = Ask("Сброс пароля посетителя: " + customer.GetProperty("username").GetString(),
+            "Новый пароль", "Повтор пароля", "Причина восстановления");
+        if (values is null) return;
+        if (values[0].Length is < 10 or > 128 || values[0] != values[1] || string.IsNullOrWhiteSpace(values[2]))
+            throw new InvalidOperationException("Пароль: 10–128 символов; повтор должен совпадать. Укажите причину.");
+        // Credentials are sent directly, never through the persistent pending-operation file.
+        await transport.Request($"/api/admin/customers/{id}/password",
+            new { newPassword = values[0], confirmPassword = values[1], reason = values[2] });
+        await RefreshState();
+        status.Text = "Пароль посетителя изменён, прежние входы отозваны. Оплаченный сеанс продолжается по прежним правилам.";
+    }
+
     private async Task ManageStaff(bool reset)
     {
         if (!loggedIn || snapshot.GetProperty("user").GetProperty("role").GetString() != "Owner") throw new InvalidOperationException("Доступно только владельцу.");

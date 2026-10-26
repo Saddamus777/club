@@ -217,6 +217,10 @@ admin.MapPost("/staff/{id}/password", (ClaimsPrincipal user, string id, StaffPas
 {
     store.ManageStaff(Id(user), id, null, request); return Results.Ok();
 }).RequireAuthorization("Owner");
+admin.MapPost("/customers/{id}/password", (ClaimsPrincipal user, string id, CustomerPasswordRequest request) =>
+{
+    store.ResetCustomerPassword(Id(user), id, request); return Results.Ok();
+});
 admin.MapPost("/devices", (ClaimsPrincipal user, DeviceBinding request) => store.BindDevice(Id(user), request));
 admin.MapPost("/computers", (ClaimsPrincipal user, ComputerRequest request) => store.AddComputer(Id(user), request));
 admin.MapPost("/packages", (ClaimsPrincipal user, PackageRequest request) => store.SavePackage(Id(user), request));

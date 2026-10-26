@@ -125,6 +125,24 @@ public sealed partial class ClubStore : IDisposable
         }
     }
 
+    public void ResetCustomerPassword(string actor, string target, CustomerPasswordRequest request)
+    {
+        lock (gate)
+        {
+            using var db = Open(path);
+            using var tx = db.BeginTransaction();
+            RequireStaff(db, tx, actor);
+            var customer = RequireCustomer(db, tx, target);
+            var reason = Text(request.Reason, 500);
+            if (request.NewPassword is null || request.NewPassword.Length is < 10 or > 128 || request.NewPassword != request.ConfirmPassword)
+                throw new RuleException("Новый пароль: 10–128 символов; повтор должен совпадать.");
+            Execute(db, tx, "UPDATE Accounts SET PasswordHash=$1,AuthRevision=AuthRevision+1 WHERE Id=$0",
+                target, passwords.HashPassword(customer, request.NewPassword));
+            Audit(db, tx, actor, "CustomerPasswordReset", target, reason);
+            tx.Commit();
+        }
+    }
+
     public bool HasOwner()
     {
         lock (gate)
