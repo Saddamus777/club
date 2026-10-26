@@ -25,14 +25,24 @@ try {
             throw 'Concurrent maintenance was not refused before interrupting service.'
         }
     } finally { $held.Dispose() }
-    & $update -PayloadRoot $PayloadRoot
+    $variant = Join-Path $temporary 'variant'
+    New-Item -ItemType Directory -Path $variant | Out-Null
+    foreach ($component in @('Agent','Visitor','agent-payload.json')) {
+        Copy-Item -LiteralPath (Join-Path $PayloadRoot $component) -Destination $variant -Recurse
+    }
+    'compatible payload variant' | Set-Content (Join-Path $variant 'Visitor\update-fixture.txt')
+    python scripts/write-agent-manifest.py $variant
+    if ($LASTEXITCODE -ne 0) { throw 'Could not generate compatible update fixture.' }
+    & $update -PayloadRoot $variant
+    if (-not (Test-Path (Join-Path $root 'Visitor\update-fixture.txt'))) { throw 'New payload file was not installed.' }
     if ((Get-LocalUser -Name $VisitorUser).Enabled) { throw 'Updater enabled visitor without review.' }
     $archives = @(Get-ChildItem -LiteralPath $root -Directory -Filter '.update-*' | Where-Object {
         Test-Path -LiteralPath (Join-Path $_.FullName 'previous\agent-payload.json')
     })
     if ($archives.Count -ne 1) { throw 'Previous verified payload was not retained.' }
     & (Join-Path $PayloadRoot 'Setup\Verify-AgentPayload.ps1') -PayloadRoot (Join-Path $archives[0].FullName 'previous')
-    New-Item -ItemType Directory -Path $temporary | Out-Null
+    & $update -PayloadRoot (Join-Path $archives[0].FullName 'previous')
+    if (Test-Path (Join-Path $root 'Visitor\update-fixture.txt')) { throw 'Manual rollback retained a newer payload file.' }
     foreach ($component in @('Agent','Visitor','agent-payload.json')) {
         Copy-Item -LiteralPath (Join-Path $PayloadRoot $component) -Destination $temporary -Recurse
     }
@@ -68,7 +78,7 @@ try {
     if ((Get-Service ClubAgent).Status -ne 'Running' -or (Test-Path (Join-Path $data 'update-in-progress.json')) -or
         (Get-FileHash (Join-Path $root 'Agent\Club.Agent.exe')).Hash -ne $originalExe) { throw 'Interrupted update recovery failed.' }
     & (Join-Path $PayloadRoot 'Setup\Verify-AgentPayload.ps1') -PayloadRoot $root
-    Write-Host 'PASS: exclusive maintenance update, previous payload retained, enabled visitor and corrupt bundle rejected without restart, invalid EXE rolled back, device configuration/catalog preserved; interrupted move recovered without relying on journal flags.'
+    Write-Host 'PASS: exclusive maintenance update, previous payload retained, compatible added file installed and removed by manual rollback, enabled visitor and corrupt bundle rejected without restart, invalid EXE rolled back, device configuration/catalog preserved; interrupted move recovered without relying on journal flags.'
 } finally {
     Enable-LocalUser -Name $VisitorUser
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
