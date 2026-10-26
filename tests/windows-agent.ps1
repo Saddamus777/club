@@ -117,6 +117,7 @@ try {
     # Credential probes must not race an automatically opened Visitor for the single pipe.
     Disable-ScheduledTask -TaskName ClubVisitor -TaskPath '\' | Out-Null
     Wait-Until { (Test-Path (Join-Path $work 'report.json')) -and (Test-Path (Join-Path $data 'session.json')) } 'No authenticated HTTPS heartbeat/checkpoint.'
+    & (Join-Path $PSScriptRoot 'windows-update.ps1') -PayloadRoot (Split-Path -Parent $setup) -VisitorUser $visitor.Name
     $service = Get-CimInstance Win32_Service -Filter "Name='ClubAgent'"
     if ($service.State -ne 'Running' -or $service.StartName -ne 'LocalSystem' -or $service.StartMode -ne 'Auto') { throw 'Wrong service identity or start mode.' }
     if (-not (Test-Path ('Cert:\LocalMachine\Root\' + $cert.Thumbprint))) { throw 'Server trust was not installed.' }
@@ -159,6 +160,14 @@ try {
     if ($recovered.remainingMs -le 0 -or $recovered.remainingMs -gt $before.remainingMs) { throw 'Recovery added or lost all paid time.' }
     Start-Sleep -Seconds 1
     if ((Read-Json (Join-Path $data 'session.json')).remainingMs -ne $recovered.remainingMs) { throw 'Recovery consumed time.' }
+    Disable-LocalUser -Name $visitor.Name
+    try { & (Join-Path $setup 'Update-Agent.ps1') -PayloadRoot (Split-Path -Parent $setup) }
+    finally { Enable-LocalUser -Name $visitor.Name }
+    $afterUpdate = Read-Json (Join-Path $data 'session.json')
+    if ($afterUpdate.state -ne 'Recovery' -or $afterUpdate.remainingMs -ne $recovered.remainingMs) {
+        throw 'Maintenance update changed the saved paid remainder or resumed it.'
+    }
+    Write-Host 'PASS: maintenance update preserved exact paid remainder in offline Recovery and did not auto-resume.'
     Set-Grant 'Running' 2 10000
     Start-FixtureServer | Out-Null
     Wait-Until { $r = Read-Json (Join-Path $work 'report.json'); $r.state -eq 'Running' -and $r.revision -eq 2 } 'Explicit resume was not applied.'
