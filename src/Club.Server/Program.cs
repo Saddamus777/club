@@ -11,9 +11,52 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 
-var builder = WebApplication.CreateBuilder(args);
+if (args.Any(a => a.StartsWith("--recover", StringComparison.OrdinalIgnoreCase) && a != "--recover-owner"))
+{
+    Console.Error.WriteLine("Неизвестная команда восстановления. Используйте --recover-owner; сервер не запущен.");
+    Environment.ExitCode = 1;
+    return;
+}
+
+// Standalone maintenance switches are not key/value configuration options. Leaving one
+// in the configuration provider consumes the following option as its value.
+var configurationArgs = args.Where(a => a is not ("--create-owner" or "--recover-owner" or "--open-browser")).ToArray();
+var builder = WebApplication.CreateBuilder(configurationArgs);
 var dataDirectory = Path.GetFullPath(builder.Configuration["Club:DataDirectory"] ??
     Path.Combine(AppContext.BaseDirectory, ".data"));
+
+if (args.Contains("--recover-owner"))
+{
+    try
+    {
+        if (args.Count(a => a == "--recover-owner") != 1 || args.Any(a => a is "--create-owner" or "--verify-backup" or "--restore-backup"))
+            throw new RuleException("Не объединяйте восстановление владельца с другими служебными командами.");
+        if (OperatingSystem.IsWindows())
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            if (!new System.Security.Principal.WindowsPrincipal(identity).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+                throw new UnauthorizedAccessException("Откройте консоль от имени администратора Windows.");
+        }
+        Console.WriteLine("Локальное восстановление владельца. Сервер должен быть остановлен; перед изменением будет создана копия.");
+        Console.Write("Логин существующего владельца: ");
+        var username = Console.ReadLine() ?? "";
+        Console.Write("Новый пароль (10–128 символов, ввод скрыт): ");
+        var password = ReadPassword();
+        Console.Write("Повторите пароль: ");
+        var confirmation = ReadPassword();
+        Console.Write("Причина восстановления (без пароля): ");
+        var reason = Console.ReadLine() ?? "";
+        var backup = OwnerRecovery.Reset(dataDirectory, username, password, confirmation, reason);
+        Console.WriteLine("Доступ владельца восстановлен; прежние входы отозваны. Копия до изменения: " + backup);
+        Console.WriteLine("Запустите сервер обычной командой. Возобновление сеансов подтверждается сотрудником.");
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or RuleException or Microsoft.Data.Sqlite.SqliteException or InvalidDataException)
+    {
+        Console.Error.WriteLine("Восстановление не выполнено: " + ex.Message);
+        Environment.ExitCode = 1;
+    }
+    return;
+}
 
 if (args.Contains("--verify-backup") || args.Contains("--restore-backup"))
 {

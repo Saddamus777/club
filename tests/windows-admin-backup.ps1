@@ -33,10 +33,12 @@ function Post([string]$Path, $Body, $Session) {
     return Invoke-RestMethod ('http://127.0.0.1:5080' + $Path) -Method Post -WebSession $Session -Headers @{ 'X-CSRF-TOKEN' = $token } `
         -ContentType 'application/json' -Body ($Body | ConvertTo-Json -Depth 6) -TimeoutSec 15
 }
-function Native([string]$Exe, [string[]]$Arguments, [int]$Expected = 0) {
+function Native([string]$Exe, [string[]]$Arguments, [int]$Expected = 0, [string]$InputFile = "") {
     $prefix = Join-Path $work ([Guid]::NewGuid().ToString('N'))
     $quoted = ($Arguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
-    $process = Start-Process -FilePath $Exe -ArgumentList $quoted -WorkingDirectory $work -PassThru `
+    $inputOptions = @{}
+    if ($InputFile) { $inputOptions.RedirectStandardInput = $InputFile }
+    $process = Start-Process @inputOptions -FilePath $Exe -ArgumentList $quoted -WorkingDirectory $work -PassThru `
         -RedirectStandardOutput ($prefix + '.out') -RedirectStandardError ($prefix + '.err')
     try {
         $handle = $process.Handle
@@ -90,6 +92,46 @@ try {
         throw 'Restored database lost the balance or staff accounts.'
     }
     Write-Host 'PASS: real Windows server, native Admin authenticated download and full verification, existing backup preserved, customer denied, corruption rejected, separate restored server has exact balance and staff accounts.'
+    $newPassword = [Guid]::NewGuid().ToString('N') + '!bB8'
+    $stdin = Join-Path $work 'owner-recovery-input.txt'
+    [IO.File]::WriteAllLines($stdin, @('fixture-owner', $newPassword, $newPassword, 'Lost owner password test'), (New-Object Text.UTF8Encoding($false)))
+    $wrongData = Join-Path $work 'must-not-create'
+    Native $serverExe @('--recover-ownre', '--Club:DataDirectory', $wrongData) 1 $stdin
+    if (Test-Path $wrongData) { throw 'Mistyped recovery command created a new installation.' }
+    $cliData = Join-Path $work 'cli-created'
+    Native $serverExe @('--create-owner', '--Club:DataDirectory', $cliData) 0 $stdin
+    if (-not (Test-Path (Join-Path $cliData 'club.db')) -or (Test-Path (Join-Path (Split-Path -Parent $serverExe) '.data'))) {
+        throw 'Standalone CLI flag consumed the requested data directory.'
+    }
+    Native $serverExe @('--verify-backup', (Join-Path $cliData 'club.db'))
+    Native $serverExe @('--recover-owner', '--Club:DataDirectory', $restored, '--Club:Lan:Enabled', 'true') 1 $stdin
+    # Live-server refusal must not invalidate its owner's cookie.
+    Invoke-RestMethod 'http://127.0.0.1:5080/api/state' -WebSession $recoveredOwner -TimeoutSec 5 | Out-Null
+    Stop-TestServer
+    Native $serverExe @('--recover-owner', '--Club:DataDirectory', $restored, '--Club:Lan:Enabled', 'true') 0 $stdin
+    $copies = @(Get-ChildItem -LiteralPath (Join-Path $restored 'backups') -Filter 'before-owner-recovery-*.db')
+    if ($copies.Count -ne 1) { throw 'Owner recovery did not create exactly one pre-change backup.' }
+    Native $serverExe @('--verify-backup', $copies[0].FullName)
+    foreach ($log in Get-ChildItem -LiteralPath $work -File | Where-Object { $_.Extension -in @('.out','.err') }) {
+        $text = [IO.File]::ReadAllText($log.FullName)
+        if ($text.Contains($newPassword) -or $text.Contains($password)) { throw 'A credential appeared in process output.' }
+    }
+    Start-TestServer $restored | Out-Null
+    $oldCookieRejected = $false
+    try { Invoke-RestMethod 'http://127.0.0.1:5080/api/state' -WebSession $recoveredOwner -TimeoutSec 5 | Out-Null }
+    catch { $oldCookieRejected = [int]$_.Exception.Response.StatusCode -eq 401 }
+    if (-not $oldCookieRejected) { throw 'Pre-recovery owner cookie was accepted.' }
+    $newOwner = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $oldPasswordRejected = $false
+    try { Post '/api/login' @{ username = 'fixture-owner'; password = $password } $newOwner | Out-Null }
+    catch { $oldPasswordRejected = [int]$_.Exception.Response.StatusCode -eq 401 }
+    if (-not $oldPasswordRejected) { throw 'Pre-recovery owner password was accepted.' }
+    Post '/api/login' @{ username = 'fixture-owner'; password = $newPassword } $newOwner | Out-Null
+    $state = Invoke-RestMethod 'http://127.0.0.1:5080/api/state' -WebSession $newOwner -TimeoutSec 5
+    if ($state.customers[0].balanceMinor -ne 12345 -or $state.employees.Count -ne 2 -or
+        @($state.audit | Where-Object action -eq 'OwnerAccessRecovered').Count -ne 1) { throw 'Owner recovery changed financial/staff data or did not audit.' }
+    Write-Host 'PASS: real offline owner recovery CLI refused running server, backed up database, revoked old password/cookie, preserved balance and staff, emitted no passwords.'
+
 } finally {
     Stop-TestServer
     if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
