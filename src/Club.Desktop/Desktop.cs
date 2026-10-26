@@ -1,0 +1,918 @@
+using System.Diagnostics;
+using System.Net.Http;
+using System.IO.Pipes;
+using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Text.Json;
+using Club.Protocol;
+
+namespace Club.Desktop;
+
+internal static class Program
+{
+    [STAThread]
+    private static void Main(string[] args)
+    {
+#if ADMIN
+        if (args.Length == 2 && args[0] == "--download-backup-smoke")
+        {
+            try { NativeBackup.DownloadSmoke(args[1]).GetAwaiter().GetResult(); }
+            catch (Exception ex) { Console.Error.WriteLine(ex.Message); Environment.ExitCode = 1; }
+            return;
+        }
+        if (args.Length == 2 && args[0] == "--verify-backup-smoke")
+        {
+            try { NativeBackup.Verify(args[1], CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (Exception ex) { Console.Error.WriteLine(ex.Message); Environment.ExitCode = 1; }
+            return;
+        }
+#endif
+#if VISITOR
+        // Manual launch and the logon task must not compete for the single visitor pipe.
+        using var instance = new Mutex(true, "Local\\Club.Visitor." + WindowsIdentity.GetCurrent().User!.Value +
+            (args.Contains("--smoke-test") ? ".Smoke" : ""), out var firstInstance);
+        if (!firstInstance) return;
+#endif
+        ApplicationConfiguration.Initialize();
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => MessageBox.Show(e.Exception.Message, "Клуб: ошибка");
+        using var window = new MainWindow(args.Contains("--smoke-test"));
+        Application.Run(window);
+    }
+}
+
+internal sealed class Transport : IDisposable
+{
+#if ADMIN
+    private readonly ApiClient api = new("http://127.0.0.1:5080");
+#else
+    private NamedPipeClientStream? pipe;
+#endif
+    public async Task<JsonElement> Request(string path, object? body = null)
+    {
+        var request = new RpcRequest(path, body is null ? null : JsonSerializer.Serialize(body, ApiClient.Json));
+#if ADMIN
+        if (body is not null) await api.Security();
+        return ApiClient.Ensure(await api.Send(request));
+#else
+        if (pipe is null || !pipe.IsConnected)
+        {
+            pipe?.Dispose();
+            pipe = new NamedPipeClientStream(".", PipeWire.Name, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
+            await pipe.ConnectAsync(3000);
+            // A visitor must not be able to impersonate the service by creating the pipe first.
+            var owner = pipe.GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+            if (owner is null || !owner.IsWellKnown(WellKnownSidType.LocalSystemSid))
+            {
+                pipe.Dispose(); pipe = null;
+                throw new UnauthorizedAccessException("Локальный канал не принадлежит службе SYSTEM.");
+            }
+        }
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await PipeWire.Write(pipe, request, timeout.Token);
+            return ApiClient.Ensure(await PipeWire.Read<RpcResponse>(pipe, timeout.Token));
+        }
+        catch (Exception ex) when (ex is IOException or OperationCanceledException)
+        {
+            pipe.Dispose(); pipe = null;
+            throw new IOException("Соединение со службой потеряно. Войдите снова; неизвестную покупку повторяйте с прежним номером.", ex);
+        }
+#endif
+    }
+    public void Dispose()
+    {
+#if ADMIN
+        api.Dispose();
+#else
+        pipe?.Dispose();
+#endif
+    }
+    public Task DownloadBackup(string destination)
+    {
+#if ADMIN
+        NativeBackup.EnsureAvailable();
+        return api.DownloadBackup(destination, NativeBackup.Verify);
+#else
+        throw new InvalidOperationException("Копии доступны только на компьютере администратора.");
+#endif
+    }
+}
+
+internal sealed class MainWindow : Form
+{
+#if ADMIN
+    private static readonly bool Staff = true;
+#else
+    private static readonly bool Staff = false;
+#endif
+    private readonly Transport transport = new();
+    private readonly Button themeButton = new() { AutoSize = true, Margin = new Padding(4) };
+    private readonly string themeFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Club", Staff ? "admin-theme.txt" : "visitor-theme.txt");
+    private bool darkTheme = true;
+    private readonly Label status = new() { AutoSize = true, MaximumSize = new Size(1000, 0), Padding = new Padding(12) };
+    private readonly TabControl tabs = new() { Dock = DockStyle.Fill };
+    private readonly FlowLayoutPanel actions = new() { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(10), WrapContents = true };
+    private readonly Dictionary<string, DataGridView> grids = [];
+    private readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
+    private readonly string pendingFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Club", Staff ? "admin-pending.json" : "visitor-pending.json");
+    private JsonElement snapshot;
+    private bool busy;
+    private bool loggedIn;
+    private string? warnedSession;
+    private readonly bool smoke;
+    private Button? createStaffButton;
+
+    public MainWindow(bool smoke)
+    {
+        this.smoke = smoke;
+        try { darkTheme = !File.Exists(themeFile) || File.ReadAllText(themeFile).Trim() != "light"; }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        Text = Staff ? "Клуб — администратор · 0.2 pilot" : "Клуб — посетитель · 0.2 pilot";
+        Size = new Size(1120, 760); MinimumSize = new Size(780, 540); StartPosition = FormStartPosition.CenterScreen;
+        Font = new Font("Segoe UI", 11);
+        var bottom = new Panel { Dock = DockStyle.Bottom, Height = 100, AutoScroll = true };
+        bottom.Controls.Add(status);
+        Controls.Add(tabs); Controls.Add(actions); Controls.Add(bottom);
+        themeButton.Click += (_, _) =>
+        {
+            darkTheme = !darkTheme;
+            ApplyTheme();
+            if (smoke) return; // Smoke mode never overwrites a real user's preference.
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(themeFile)!);
+                File.WriteAllText(themeFile, darkTheme ? "dark" : "light");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { status.Text = "Фон изменён. Сохранить выбор не удалось: " + ex.Message; }
+        };
+        actions.Controls.Add(themeButton);
+        tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
+        tabs.DrawItem += (_, e) => DesktopTheme.DrawTab(tabs, e, darkTheme);
+        Button("Войти", Login);
+        Button(Staff ? "Создать владельца" : "Регистрация", Register);
+        Button("Обновить", RefreshState);
+        Button("Сменить пароль", ChangePassword);
+        Button("Повторить незавершённый запрос", RetryPending);
+        Button("Выйти", async () => { await transport.Request("/api/logout", new { }); loggedIn = false; if (createStaffButton is not null) createStaffButton.Visible = false; snapshot = default; foreach (var grid in grids.Values) grid.Rows.Clear(); status.Text = "Вы вышли из аккаунта."; });
+        if (Staff)
+        {
+            Grid("computers", "Компьютеры", ("id", "ID"), ("name", "Место"), ("managed", "Привязка"), ("occupied", "Занято"), ("lastSeenMs", "Связь (UTC ms)"));
+            Grid("customers", "Посетители", ("id", "ID"), ("username", "Логин"), ("balanceMinor", "Баланс, сом"));
+            Button("Добавить ПК", AddComputer); Button("Пополнить", TopUp); Button("Новый тариф", () => Package(false)); Button("Изменить тариф", () => Package(true));
+            Button("Пауза", () => Session("pause")); Button("Продолжить", () => Session("resume")); Button("Завершить", () => Session("end"));
+            Button("Бесплатное время", FreeSession); Button("Возврат", Refund); Button("Привязать ПК", BindDevice);
+            Button("Резервная копия", SaveBackup);
+            Button("Сброс пароля посетителя", ResetCustomerPassword);
+            createStaffButton = Button("Новый сотрудник", CreateStaff);
+            createStaffButton.Visible = false;
+            Grid("employees", "Сотрудники (владелец)", ("id", "ID"), ("username", "Логин"), ("role", "Роль"), ("disabled", "Заблокирован"));
+            Button("Доступ сотрудника", () => ManageStaff(false));
+            Button("Сброс пароля сотрудника", () => ManageStaff(true));
+        }
+        else
+        {
+            Button("Купить выбранный пакет", Purchase);
+            Button("Список игр", RefreshGames);
+            Button("Запустить игру", LaunchGame);
+            Grid("games", "Игры и браузер", ("id", "ID"), ("name", "Название"));
+        }
+        Grid("packages", "Пакеты", ("id", "ID"), ("name", "Название"), ("minutes", "Минуты"), ("priceMinor", "Цена, сом"), ("active", "Активен"));
+        Grid("sessions", "Сеансы", ("id", "ID"), ("username", "Посетитель"), ("computerName", "ПК"), ("packageName", "Пакет"), ("remainingMs", "Остаток, мс"), ("status", "Состояние"), ("revision", "Команда"), ("ackRevision", "Подтверждение"), ("availableRefundMinor", "Доступный возврат, сом"));
+        if (Staff)
+        {
+            Grid("audit", "Журнал", ("createdMs", "UTC ms"), ("actor", "Сотрудник"), ("action", "Операция"), ("details", "Описание"));
+            var reportPage = new TabPage("Отчёт");
+            reportPage.Controls.Add(new TextBox { Name = "report", Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both });
+            tabs.TabPages.Add(reportPage);
+        }
+        ApplyTheme();
+        Shown += async (_, _) =>
+        {
+            if (smoke)
+            {
+                if (Staff)
+                {
+                    PackageEditor.Smoke(); MoneyEditor.Smoke(); StaffEditor.Smoke();
+                    var balances = grids["customers"];
+                    balances.Rows.Add("a", "test-a", 100.05m);
+                    balances.Rows.Add("b", "test-b", 20.12m);
+                    balances.Sort(balances.Columns["balanceMinor"]!, System.ComponentModel.ListSortDirection.Ascending);
+                    if (Convert.ToString(balances.Rows[0].Cells["id"].Value) != "b" || Convert.ToString(balances.Rows[0].Cells["balanceMinor"].FormattedValue) != "20,12")
+                        throw new InvalidOperationException("Money grid must format soms and sort numerically.");
+                    balances.Rows.Clear();
+                }
+                var timer = new System.Windows.Forms.Timer { Interval = 500 };
+                var original = darkTheme;
+                darkTheme = true; ApplyTheme();
+                timer.Tick += (_, _) =>
+                {
+                    var output = Path.Combine(Environment.CurrentDirectory, "artifacts", "ui");
+                    Directory.CreateDirectory(output);
+                    using var image = new Bitmap(Width, Height);
+                    DrawToBitmap(image, new Rectangle(Point.Empty, Size));
+                    image.Save(Path.Combine(output, $"{(Staff ? "Admin" : "Visitor")}-{(darkTheme ? "dark" : "light")}.png"));
+                    if (darkTheme) { themeButton.PerformClick(); return; }
+                    darkTheme = original;
+                    timer.Stop(); timer.Dispose(); Close();
+                };
+                timer.Start(); return;
+            }
+#if ADMIN
+            TryStartServer();
+#endif
+            status.Text = "Испытательная версия. Войдите в аккаунт. Суммы указаны в тыйынах: 100 = 1 сом.";
+            if (File.Exists(pendingFile)) status.Text += " Есть запрос с неизвестным исходом: повторите его после входа.";
+            await Task.CompletedTask;
+            refresh.Start();
+            if (!Staff)
+            {
+                busy = true;
+                try { await RefreshGames(); }
+                catch (Exception ex) { status.Text = ex.Message; }
+                finally { busy = false; }
+            }
+        };
+        refresh.Tick += async (_, _) =>
+        {
+            if (busy || smoke) return;
+            busy = true;
+            try
+            {
+                if (!Staff) await LocalStatus();
+                if (loggedIn && DateTime.UtcNow.Second % 5 == 0) await RefreshState();
+            }
+            catch (Exception ex) { status.Text = ex.Message; }
+            finally { busy = false; }
+        };
+        FormClosed += (_, _) => { refresh.Dispose(); transport.Dispose(); };
+    }
+#if ADMIN
+    private void TryStartServer()
+    {
+        var exe = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Server", "Club.Server.exe"));
+        if (File.Exists(exe))
+        {
+            // Server itself owns an exclusive database lock; do not terminate an existing server on app exit.
+            using var connection = new System.Net.Sockets.TcpClient();
+            try { connection.Connect("127.0.0.1", 5080); }
+            catch (System.Net.Sockets.SocketException) { Process.Start(new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe)!, UseShellExecute = true }); }
+        }
+    }
+#endif
+    private void ApplyTheme()
+    {
+        DesktopTheme.Apply(this, darkTheme);
+        themeButton.Text = darkTheme ? "Светлый фон" : "Чёрный фон";
+        tabs.Invalidate();
+    }
+    private Button Button(string title, Func<Task> action)
+    {
+        var button = new Button { Text = title, AutoSize = true, Margin = new Padding(4) };
+        button.Click += async (_, _) =>
+        {
+            if (busy) return;
+            busy = true; actions.Enabled = false;
+            try { await action(); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Клуб", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            finally { busy = false; actions.Enabled = true; }
+        };
+        actions.Controls.Add(button);
+        return button;
+    }
+    private void Grid(string name, string title, params (string Key, string Caption)[] columns)
+    {
+        var grid = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false,
+            AllowUserToDeleteRows = false, MultiSelect = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, RowHeadersVisible = false };
+        foreach (var (key, caption) in columns)
+        {
+            var index = grid.Columns.Add(key, caption);
+            if (key is "priceMinor" or "balanceMinor" or "availableRefundMinor")
+            {
+                grid.Columns[index].ValueType = typeof(decimal);
+                grid.Columns[index].DefaultCellStyle.Format = "0.00";
+                grid.Columns[index].DefaultCellStyle.FormatProvider = System.Globalization.CultureInfo.GetCultureInfo("ru-RU");
+                grid.Columns[index].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+            }
+        }
+        grid.Columns["id"]?.SetVisible(false);
+        var page = new TabPage(title); page.Controls.Add(grid); tabs.TabPages.Add(page); grids[name] = grid;
+    }
+    private string Selected(string table, string key = "id") => grids[table].SelectedRows.Count == 1
+        ? Convert.ToString(grids[table].SelectedRows[0].Cells[key].Value) ?? throw new InvalidOperationException("Выберите строку.")
+        : throw new InvalidOperationException("Выберите строку на вкладке «" + grids[table].Parent!.Text + "».");
+    private async Task Login()
+    {
+        var values = Ask("Вход", "Логин", "Пароль"); if (values is null) return;
+        var result = await transport.Request("/api/login", new { username = values[0], password = values[1] });
+        var role = result.GetProperty("role").GetString();
+        if (Staff ? role is not ("Owner" or "Admin") : role != "Customer")
+        { await transport.Request("/api/logout", new { }); throw new InvalidOperationException("Этот аккаунт предназначен для другого приложения."); }
+        loggedIn = true; await RefreshState();
+    }
+    private async Task ChangePassword()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        if (File.Exists(pendingFile)) throw new InvalidOperationException("Сначала завершите повтор незавершённой операции.");
+        var values = Ask("Смена пароля", "Текущий пароль", "Новый пароль", "Повтор нового пароля");
+        if (values is null) return;
+        if (values[1].Length is < 10 or > 128 || values[1] != values[2]) throw new InvalidOperationException("Новый пароль: 10–128 символов; повтор должен совпадать.");
+        try
+        {
+            // Passwords never enter the durable pending-operation file.
+            await transport.Request("/api/password", new { currentPassword = values[0], newPassword = values[1], confirmPassword = values[2] });
+        }
+        catch (Exception ex) when (ex is IOException or HttpRequestException or OperationCanceledException)
+        { throw new IOException("Ответ не получен. Пароль мог измениться: войдите с новым паролем для проверки.", ex); }
+        loggedIn = false; snapshot = default;
+        if (createStaffButton is not null) createStaffButton.Visible = false;
+        foreach (var grid in grids.Values) grid.Rows.Clear();
+        status.Text = "Пароль изменён. Все прежние входы отозваны. Войдите с новым паролем.";
+    }
+    private async Task Register()
+    {
+        var values = Ask(Staff ? "Первоначальная настройка" : "Регистрация", "Логин", "Пароль", "Повтор пароля"); if (values is null) return;
+        if (values[1] != values[2]) throw new InvalidOperationException("Пароли не совпадают.");
+        await transport.Request(Staff ? "/api/setup/owner" : "/api/register", new { username = values[0], password = values[1], confirmPassword = values[2] });
+        status.Text = "Аккаунт создан. Нажмите «Войти».";
+    }
+    private async Task RefreshState()
+    {
+        if (!loggedIn) return;
+        snapshot = await transport.Request("/api/state");
+        foreach (var (name, grid) in grids)
+        {
+            if (name == "games") continue;
+            var selected = grid.SelectedRows.Count == 1 ? Convert.ToString(grid.SelectedRows[0].Cells[0].Value) : null;
+            grid.Rows.Clear();
+            // A still-running older server can serve existing functions until it is restarted.
+            if (name == "employees" && !snapshot.TryGetProperty(name, out _)) continue;
+            foreach (var row in snapshot.GetProperty(name).EnumerateArray())
+            {
+                var values = grid.Columns.Cast<DataGridViewColumn>().Select(c => row.TryGetProperty(c.Name, out var value)
+                    ? c.Name is "priceMinor" or "balanceMinor" or "availableRefundMinor" ? (object)(value.GetInt64() / 100m)
+                    : c.Name is "active" or "disabled" ? (value.GetInt64() == 1 ? "Да" : "Нет")
+                    : c.Name == "role" ? (value.GetString() == "Owner" ? "Владелец" : "Администратор") : value.ToString() : "").Cast<object>().ToArray();
+                var index = grid.Rows.Add(values);
+                if (Convert.ToString(values[0]) == selected) grid.Rows[index].Selected = true;
+            }
+        }
+        if (Staff)
+        {
+            var text = tabs.TabPages.Cast<TabPage>().SelectMany(p => p.Controls.Cast<Control>()).OfType<TextBox>().Single();
+            var report = snapshot.GetProperty("report");
+            var lines = new List<string>();
+            foreach (var (key, label) in new[] { ("topUpsMinor", "Пополнения"), ("purchasesMinor", "Покупки"),
+                ("refundsMinor", "Выданные возвраты"), ("walletBalancesMinor", "Остатки на балансах"),
+                ("cashNetMinor", "Наличные: получено минус возвраты"), ("transferNetMinor", "Переводы: получено минус возвраты") })
+                lines.Add($"{label}: {KgsMoney.Format(report.GetProperty(key).GetInt64())} сом");
+            lines.Add(""); lines.Add("Операции сотрудников за всё время:");
+            foreach (var row in report.GetProperty("byEmployee").EnumerateArray())
+                lines.Add($"{row.GetProperty("username")}: {(row.GetProperty("kind").GetString() == "TopUp" ? "Пополнение" : "Возврат")}, " +
+                    $"{(row.GetProperty("method").GetString() == "Cash" ? "наличные" : "перевод")} — {KgsMoney.Format(row.GetProperty("amountMinor").GetInt64())} сом, операций: {row.GetProperty("operations")}");
+            text.Text = string.Join(Environment.NewLine, lines);
+        }
+        var user = snapshot.GetProperty("user");
+        if (createStaffButton is not null) createStaffButton.Visible = user.GetProperty("role").GetString() == "Owner";
+        status.Text = $"{user.GetProperty("username")} · Баланс: {KgsMoney.Format(user.GetProperty("balanceMinor").GetInt64())} сом. Команда выполнена, когда её номер совпал с подтверждением ПК.";
+    }
+    private async Task RefreshGames()
+    {
+        var games = await transport.Request("/local/games");
+        var grid = grids["games"];
+        var selected = grid.SelectedRows.Count == 1 ? Convert.ToString(grid.SelectedRows[0].Cells[0].Value) : null;
+        grid.Rows.Clear();
+        foreach (var game in games.Deserialize<GameSummary[]>(ApiClient.Json)!)
+        {
+            var row = grid.Rows.Add(game.Id, game.Name);
+            if (game.Id == selected) grid.Rows[row].Selected = true;
+        }
+        if (grid.Rows.Count == 0) status.Text = "Каталог пуст. Сотрудник должен добавить установленные игры.";
+    }
+    private async Task LaunchGame()
+    {
+        var result = await transport.Request("/local/games/launch", new GameLaunchRequest(Selected("games")));
+        var approval = result.Deserialize<GameLaunchApproval>(ApiClient.Json)!;
+        var local = (await transport.Request("/local/status")).Deserialize<AgentStatus>(ApiClient.Json)!;
+        if (local.Grant.State != "Running" || local.Grant.RemainingMs <= 0 ||
+            local.Grant.SessionId != approval.SessionId || local.Grant.Revision != approval.Revision)
+            throw new InvalidOperationException("Состояние сеанса изменилось. Запуск отменён.");
+        // This process belongs to the standard visitor, never to the LocalSystem service.
+        using var process = Process.Start(GameCatalog.StartInfo(approval.Game))
+            ?? throw new InvalidOperationException("Не удалось запустить программу.");
+        status.Text = "Запущено: " + approval.Game.Name;
+    }
+    private async Task LocalStatus()
+    {
+        var result = await transport.Request("/local/status");
+        var local = result.Deserialize<AgentStatus>(ApiClient.Json)!;
+        var grant = local.Grant;
+        status.Text = $"{local.Message} · {grant.State} · Осталось {TimeSpan.FromMilliseconds(grant.RemainingMs):hh\\:mm\\:ss}";
+        if (grant.State == "Running" && grant.RemainingMs <= 300_000 && warnedSession != grant.SessionId)
+        {
+            warnedSession = grant.SessionId;
+            System.Media.SystemSounds.Exclamation.Play();
+            MessageBox.Show(this, "Осталось не более 5 минут. Сохраните игру: по окончании служба завершит сеанс Windows.", "Клуб — время заканчивается");
+        }
+    }
+    private async Task Mutate(string path, object body)
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        if (File.Exists(pendingFile)) throw new InvalidOperationException("Сначала повторите незавершённый запрос. Новый номер может повторить списание.");
+        var user = snapshot.GetProperty("user").GetProperty("id").GetString();
+        var pending = new Pending(user!, path, JsonSerializer.Serialize(body, ApiClient.Json));
+        Directory.CreateDirectory(Path.GetDirectoryName(pendingFile)!);
+        using (var file = new FileStream(pendingFile, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+        {
+            JsonSerializer.Serialize(file, pending, ApiClient.Json);
+            file.Flush(true);
+        }
+        await RetryPending();
+    }
+    private async Task RetryPending()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите под аккаунтом, отправившим запрос.");
+        if (!File.Exists(pendingFile)) { status.Text = "Незавершённых запросов нет."; return; }
+        var pending = JsonSerializer.Deserialize<Pending>(File.ReadAllText(pendingFile), ApiClient.Json)!;
+        if (snapshot.GetProperty("user").GetProperty("id").GetString() != pending.UserId)
+            throw new InvalidOperationException("Запрос принадлежит другому аккаунту. Обратитесь к сотруднику.");
+        try { await transport.Request(pending.Path, JsonSerializer.Deserialize<JsonElement>(pending.Json)); }
+        catch (ApiException ex) when (ex.Status is 400 or 403 or 404 or 409)
+        {
+            // The server rejects these requests before committing the operation. Network/500/401 retain it.
+            File.Delete(pendingFile);
+            throw;
+        }
+        File.Delete(pendingFile);
+        await RefreshState(); status.Text += " Запрос подтверждён.";
+    }
+    private Task AddComputer() { var v = Ask("Новое место", "Название"); return v is null ? Task.CompletedTask : Mutate("/api/admin/computers", new { name = v[0], operationId = Guid.NewGuid() }); }
+    private async Task TopUp()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        var customer = Selected("customers");
+        await RefreshState();
+        var row = snapshot.GetProperty("customers").EnumerateArray().Single(r => r.GetProperty("id").GetString() == customer);
+        var balance = row.GetProperty("balanceMinor").GetInt64();
+        var limit = Math.Min(KgsMoney.OperationLimitMinor, KgsMoney.BalanceLimitMinor - balance);
+        if (limit <= 0) throw new InvalidOperationException("Достигнут допустимый баланс. Пополнение недоступно.");
+        using var dialog = new MoneyEditor(darkTheme, false, limit,
+            $"Посетитель: {row.GetProperty("username")}\nБаланс: {KgsMoney.Format(balance)} сом");
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var result = dialog.Result!;
+        await Mutate("/api/admin/topups", new { customerId = customer, result.AmountMinor, result.Method, result.OperationId });
+    }
+    private Task Package(bool edit)
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        string? id = edit ? Selected("packages") : null;
+        var row = edit ? snapshot.GetProperty("packages").EnumerateArray().Single(p => p.GetProperty("id").GetString() == id) : default;
+        using var dialog = new PackageEditor(darkTheme, id,
+            edit ? row.GetProperty("name").GetString()! : "",
+            edit ? row.GetProperty("minutes").GetInt32() : 60,
+            edit ? row.GetProperty("priceMinor").GetInt64() : 10000,
+            !edit || row.GetProperty("active").GetInt64() == 1);
+        return dialog.ShowDialog(this) == DialogResult.OK
+            ? Mutate("/api/admin/packages", dialog.Result!) : Task.CompletedTask;
+    }
+
+    private Task Session(string action) { var id = Selected("sessions"); var v = Ask("Управление сеансом", "Причина"); return v is null ? Task.CompletedTask : Mutate($"/api/admin/sessions/{id}/{action}", new { reason = v[0], operationId = Guid.NewGuid() }); }
+    private Task FreeSession() { var customer = Selected("customers"); var computer = Selected("computers"); var v = Ask("Бесплатное время для выбранных посетителя и ПК", "Минуты", "Причина"); return v is null ? Task.CompletedTask : Mutate("/api/admin/free-sessions", new { customerId = customer, computerId = computer, minutes = int.Parse(v[0]), reason = v[1], operationId = Guid.NewGuid() }); }
+    private async Task Refund()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        var id = Selected("sessions");
+        await RefreshState();
+        var row = snapshot.GetProperty("sessions").EnumerateArray().Single(r => r.GetProperty("id").GetString() == id);
+        if (row.GetProperty("status").GetString() != "Ended" || (row.GetProperty("managed").GetInt64() == 1 && row.GetProperty("ackRevision").GetInt64() < row.GetProperty("revision").GetInt64()))
+            throw new InvalidOperationException("Сначала завершите сеанс и дождитесь подтверждения игрового ПК.");
+        var limit = Math.Min(KgsMoney.OperationLimitMinor, row.GetProperty("availableRefundMinor").GetInt64());
+        if (limit <= 0) throw new InvalidOperationException("У этого сеанса нет доступной суммы возврата.");
+        using var dialog = new MoneyEditor(darkTheme, true, limit,
+            $"Посетитель: {row.GetProperty("username")}\nПК: {row.GetProperty("computerName")} · {row.GetProperty("packageName")}");
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        var result = dialog.Result!;
+        await Mutate("/api/admin/refunds", new { sessionId = id, result.AmountMinor, result.Method, result.Reason, result.OperationId });
+    }
+    private Task Purchase() => Mutate("/api/purchases", new { packageId = Selected("packages"), operationId = Guid.NewGuid() });
+    private async Task ResetCustomerPassword()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        var id = Selected("customers");
+        await RefreshState();
+        var customer = snapshot.GetProperty("customers").EnumerateArray().Single(c => c.GetProperty("id").GetString() == id);
+        var values = Ask("Сброс пароля посетителя: " + customer.GetProperty("username").GetString(),
+            "Новый пароль", "Повтор пароля", "Причина восстановления");
+        if (values is null) return;
+        if (values[0].Length is < 10 or > 128 || values[0] != values[1] || string.IsNullOrWhiteSpace(values[2]))
+            throw new InvalidOperationException("Пароль: 10–128 символов; повтор должен совпадать. Укажите причину.");
+        // Credentials are sent directly, never through the persistent pending-operation file.
+        await transport.Request($"/api/admin/customers/{id}/password",
+            new { newPassword = values[0], confirmPassword = values[1], reason = values[2] });
+        await RefreshState();
+        status.Text = "Пароль посетителя изменён, прежние входы отозваны. Оплаченный сеанс продолжается по прежним правилам.";
+    }
+
+    private async Task ManageStaff(bool reset)
+    {
+        if (!loggedIn || snapshot.GetProperty("user").GetProperty("role").GetString() != "Owner") throw new InvalidOperationException("Доступно только владельцу.");
+        var id = Selected("employees");
+        var employee = snapshot.GetProperty("employees").EnumerateArray().Single(e => e.GetProperty("id").GetString() == id);
+        if (employee.GetProperty("role").GetString() != "Admin") throw new InvalidOperationException("Выберите сотрудника, не владельца.");
+        var title = employee.GetProperty("username").GetString();
+        if (reset)
+        {
+            var values = Ask("Сброс пароля: " + title, "Новый пароль", "Повтор пароля", "Причина");
+            if (values is null) return;
+            await transport.Request($"/api/admin/staff/{id}/password", new { newPassword = values[0], confirmPassword = values[1], reason = values[2] });
+        }
+        else
+        {
+            var disabled = employee.GetProperty("disabled").GetInt64() == 0;
+            var values = Ask((disabled ? "Заблокировать: " : "Разблокировать: ") + title, "Причина");
+            if (values is null) return;
+            await transport.Request($"/api/admin/staff/{id}/access", new { disabled, reason = values[0] });
+        }
+        await RefreshState();
+        status.Text = "Доступ сотрудника обновлён. Прежние входы отозваны.";
+    }
+
+    private async Task CreateStaff()
+    {
+        if (!loggedIn || snapshot.GetProperty("user").GetProperty("role").GetString() != "Owner")
+            throw new InvalidOperationException("Создавать сотрудников может только владелец.");
+        using var dialog = new StaffEditor(darkTheme);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            // Credentials must never enter the persistent pending-operation file.
+            await transport.Request("/api/admin/staff", dialog.Result!);
+        }
+        catch (Exception ex) when (ex is IOException or HttpRequestException or OperationCanceledException)
+        { throw new IOException("Ответ не получен. Обновите список сотрудников перед повтором: аккаунт мог быть создан.", ex); }
+        await RefreshState();
+        status.Text = "Сотрудник создан. Передайте ему начальный пароль лично.";
+    }
+    private async Task SaveBackup()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        NativeBackup.EnsureAvailable();
+        using var save = new SaveFileDialog { Title = "Сохранить новую резервную копию", Filter = "Резервная копия SQLite|*.db",
+            FileName = $"club-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}.db", OverwritePrompt = false };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        status.Text = "Создаётся и проверяется копия. Дождитесь результата перед извлечением носителя.";
+        try { await transport.DownloadBackup(save.FileName); }
+        catch { status.Text = "Новая копия не сохранена. Существующие файлы не заменялись."; throw; }
+        status.Text = "Копия сохранена и проверена: " + save.FileName + ". Храните носитель у владельца: копия содержит аккаунты и финансовые данные.";
+    }
+    private async Task BindDevice()
+    {
+        if (!loggedIn) throw new InvalidOperationException("Сначала войдите.");
+        var computer = Selected("computers");
+        using var save = new SaveFileDialog { Filter = "Привязка ПК|*.binding.json", FileName = "PC.binding.json", OverwritePrompt = true };
+        if (save.ShowDialog(this) != DialogResult.OK) return;
+        var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        var binding = new DeviceBinding(computer, token, Guid.NewGuid().ToString());
+        // Export BEFORE sending: a lost response must not lose the only copy of the device key.
+        File.WriteAllText(save.FileName, JsonSerializer.Serialize(binding, ApiClient.Json));
+        await transport.Request("/api/admin/devices", binding);
+        status.Text = "Привязка сохранена. Передайте файл установщику службы и удалите транспортную копию. При потере ответа повторите привязку из этого файла.";
+    }
+    private string[]? Ask(string title, params string[] labels)
+    {
+        using var dialog = new Form { Text = title, Width = 500, Height = 120 + labels.Length * 70, StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false };
+        var entries = new List<TextBox>();
+        for (var i = 0; i < labels.Length; i++)
+        {
+            dialog.Controls.Add(new Label { Text = labels[i], Left = 15, Top = 15 + 70 * i, Width = 450 });
+            var input = new TextBox { Left = 15, Top = 40 + 70 * i, Width = 450, UseSystemPasswordChar = labels[i].Contains("парол", StringComparison.OrdinalIgnoreCase) };
+            entries.Add(input); dialog.Controls.Add(input);
+        }
+        var ok = new Button { Text = "Подтвердить", DialogResult = DialogResult.OK, Left = 300, Top = 20 + labels.Length * 70, Width = 165 };
+        dialog.Controls.Add(ok); dialog.AcceptButton = ok;
+        DesktopTheme.Apply(dialog, darkTheme);
+        return dialog.ShowDialog(this) == DialogResult.OK ? entries.Select((x, i) => labels[i].Contains("парол", StringComparison.OrdinalIgnoreCase) ? x.Text : x.Text.Trim()).ToArray() : null;
+    }
+    private sealed record Pending(string UserId, string Path, string Json);
+}
+
+internal sealed record PackageDraft(string? Id, string Name, int Minutes, long PriceMinor, bool Active, string OperationId);
+
+internal sealed record MoneyDraft(long AmountMinor, string Method, string Reason, string OperationId);
+
+internal static class NativeBackup
+{
+    public static async Task DownloadSmoke(string requestFile)
+    {
+        if (new FileInfo(requestFile).Length > 16384) throw new InvalidDataException("Invalid smoke request.");
+        using var request = JsonDocument.Parse(File.ReadAllText(requestFile));
+        using var transport = new Transport();
+        await transport.Request("/api/login", new { username = request.RootElement.GetProperty("username").GetString(), password = request.RootElement.GetProperty("password").GetString() });
+        await transport.DownloadBackup(request.RootElement.GetProperty("destination").GetString()!);
+        await transport.Request("/api/logout", new { });
+    }
+    private static string Server => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Server", "Club.Server.exe"));
+    public static void EnsureAvailable()
+    {
+        if (!File.Exists(Server)) throw new FileNotFoundException("Для проверки копии нужна папка Server из того же Windows-комплекта.");
+    }
+    public static async Task Verify(string path, CancellationToken ct)
+    {
+        EnsureAvailable();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2));
+        var start = new ProcessStartInfo(Server) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        start.ArgumentList.Add("--verify-backup"); start.ArgumentList.Add(Path.GetFullPath(path));
+        using var process = Process.Start(start) ?? throw new IOException("Не удалось запустить проверку копии.");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch
+        {
+            if (!process.HasExited) process.Kill(true);
+            await process.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(output, error);
+            throw;
+        }
+        await Task.WhenAll(output, error);
+        if (process.ExitCode != 0) throw new InvalidDataException("Копия не прошла проверку целостности и финансового журнала. Файл не принят.");
+    }
+}
+
+internal sealed record StaffDraft(string Username, string Password);
+
+internal sealed class StaffEditor : Form
+{
+    private readonly TextBox username = new() { Width = 420, MaxLength = 32 };
+    private readonly TextBox password = new() { Width = 420, MaxLength = 128, UseSystemPasswordChar = true };
+    private readonly TextBox confirmation = new() { Width = 420, MaxLength = 128, UseSystemPasswordChar = true };
+    private readonly Button save = new() { Text = "Создать администратора", AutoSize = true };
+    public StaffDraft? Result { get; private set; }
+    public StaffEditor(bool dark)
+    {
+        Text = "Новый сотрудник"; ClientSize = new Size(500, 420); Font = new Font("Segoe UI", 11);
+        FormBorderStyle = FormBorderStyle.FixedDialog; MinimizeBox = false; MaximizeBox = false; StartPosition = FormStartPosition.CenterParent;
+        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16) };
+        layout.Controls.AddRange([new Label { Text = "Логин: 3–32 латинских символа, цифры, . _ -", AutoSize = true }, username,
+            new Label { Text = "Начальный пароль: 10–128 символов", AutoSize = true }, password,
+            new Label { Text = "Повтор пароля", AutoSize = true }, confirmation,
+            new Label { Text = "Сотрудник сможет управлять тарифами,\nпополнениями, возвратами и сеансами.", AutoSize = true }]);
+        var buttons = new FlowLayoutPanel { AutoSize = true };
+        var cancel = new Button { Text = "Отмена", DialogResult = DialogResult.Cancel, AutoSize = true };
+        buttons.Controls.AddRange([save, cancel]); layout.Controls.Add(buttons); Controls.Add(layout);
+        AcceptButton = save; CancelButton = cancel;
+        void ValidateEntry() => save.Enabled = System.Text.RegularExpressions.Regex.IsMatch(username.Text.Trim(), @"\A[a-zA-Z0-9_.-]{3,32}\z") &&
+            password.Text.Length is >= 10 and <= 128 && password.Text == confirmation.Text;
+        username.TextChanged += (_, _) => ValidateEntry(); password.TextChanged += (_, _) => ValidateEntry(); confirmation.TextChanged += (_, _) => ValidateEntry();
+        ValidateEntry();
+        save.Click += (_, _) => { ValidateEntry(); if (!save.Enabled) return; Result = new(username.Text.Trim(), password.Text); DialogResult = DialogResult.OK; };
+        DesktopTheme.Apply(this, dark);
+    }
+    public static void Smoke()
+    {
+        foreach (var dark in new[] { true, false })
+        {
+            using var dialog = new StaffEditor(dark);
+            dialog.Shown += (_, _) => dialog.BeginInvoke(() =>
+            {
+                if (dialog.save.Enabled || !dialog.password.UseSystemPasswordChar || !dialog.confirmation.UseSystemPasswordChar) throw new InvalidOperationException("Unsafe initial staff form.");
+                dialog.username.Text = "employee"; dialog.password.Text = " secret-value-123 "; dialog.confirmation.Text = "different-value";
+                if (dialog.save.Enabled) throw new InvalidOperationException("Mismatched staff passwords accepted.");
+                dialog.confirmation.Text = dialog.password.Text; dialog.username.Text = "bad login";
+                if (dialog.save.Enabled) throw new InvalidOperationException("Invalid staff login accepted.");
+                dialog.username.Text = "employee";
+                var folder = Path.Combine(Environment.CurrentDirectory, "artifacts", "ui"); Directory.CreateDirectory(folder);
+                using var image = new Bitmap(dialog.Width, dialog.Height); dialog.DrawToBitmap(image, new Rectangle(Point.Empty, dialog.Size));
+                image.Save(Path.Combine(folder, $"Staff-{(dark ? "dark" : "light")}.png"));
+                dialog.save.PerformClick();
+            });
+            if (dialog.ShowDialog() != DialogResult.OK || dialog.Result is not { Username: "employee", Password: " secret-value-123 " })
+                throw new InvalidOperationException("Staff form changed the password or username.");
+        }
+    }
+}
+
+internal sealed class MoneyEditor : Form
+{
+    private readonly TextBox amount = new() { Width = 220, MaxLength = 16 };
+    private readonly ComboBox method = new() { Width = 220, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly TextBox reason = new() { Width = 520, Height = 65, Multiline = true, MaxLength = 500 };
+    private readonly Button save = new() { AutoSize = true };
+    public MoneyDraft? Result { get; private set; }
+
+    public MoneyEditor(bool dark, bool refund, long maximumMinor, string context)
+    {
+        if (maximumMinor is <= 0 or > KgsMoney.OperationLimitMinor) throw new ArgumentOutOfRangeException(nameof(maximumMinor));
+        Text = refund ? "Ручной возврат" : "Пополнение баланса";
+        ClientSize = new Size(580, 620); Font = new Font("Segoe UI", 11);
+        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16) };
+        Label Line(string text) => new() { Text = text, AutoSize = true, MaximumSize = new Size(520, 0) };
+        method.Items.AddRange(["Наличные", "Перевод"]);
+        layout.Controls.AddRange([Line(context),
+            Line($"{(refund ? "Доступно к возврату" : "Максимум пополнения")}: {KgsMoney.Format(maximumMinor)} сом"),
+            Line("Сумма, сом (например, 100,50 или 100.50)"), amount,
+            Line(refund ? "Способ выдачи" : "Способ оплаты"), method]);
+        if (refund) layout.Controls.AddRange([Line("Причина возврата"), reason]);
+        layout.Controls.Add(Line(refund ? "Выдайте возврат посетителю вручную.\nВозврат не увеличивает внутренний баланс."
+            : "Подтверждайте пополнение после получения оплаты."));
+        var summary = Line(""); layout.Controls.Add(summary);
+        var buttons = new FlowLayoutPanel { AutoSize = true };
+        save.Text = refund ? "Подтвердить возврат" : "Подтвердить пополнение";
+        var cancel = new Button { Text = "Отмена", DialogResult = DialogResult.Cancel, AutoSize = true };
+        buttons.Controls.AddRange([save, cancel]); layout.Controls.Add(buttons); Controls.Add(layout);
+        AcceptButton = save; CancelButton = cancel;
+        void UpdateEntry()
+        {
+            var valid = KgsMoney.TryParseAmount(amount.Text, maximumMinor, out var minor);
+            save.Enabled = valid && method.SelectedIndex >= 0 && (!refund || !string.IsNullOrWhiteSpace(reason.Text));
+            summary.Text = !valid ? "Введите положительную сумму в пределах лимита,\nне более двух знаков после запятой, без разделителей тысяч."
+                : method.SelectedIndex < 0 ? "Выберите наличные или перевод."
+                : refund && string.IsNullOrWhiteSpace(reason.Text) ? "Укажите причину возврата."
+                : $"{(refund ? "К выдаче" : "К зачислению")}: {KgsMoney.Format(minor)} сом · {method.Text.ToLowerInvariant()}";
+        }
+        amount.TextChanged += (_, _) => UpdateEntry();
+        method.SelectedIndexChanged += (_, _) => UpdateEntry();
+        reason.TextChanged += (_, _) => UpdateEntry();
+        UpdateEntry();
+        save.Click += (_, _) =>
+        {
+            UpdateEntry();
+            if (!save.Enabled || !KgsMoney.TryParseAmount(amount.Text, maximumMinor, out var minor)) return;
+            Result = new(minor, method.SelectedIndex == 0 ? "Cash" : "Transfer", refund ? reason.Text.Trim() : "", Guid.NewGuid().ToString());
+            DialogResult = DialogResult.OK;
+        };
+        DesktopTheme.Apply(this, dark);
+    }
+
+    public static void Smoke()
+    {
+        foreach (var dark in new[] { true, false })
+        foreach (var refund in new[] { false, true })
+        {
+            var cap = refund ? 12345 : KgsMoney.OperationLimitMinor;
+            using var dialog = new MoneyEditor(dark, refund, cap, "Посетитель: test-customer\nПК: PC-01");
+            dialog.Shown += (_, _) => dialog.BeginInvoke(() =>
+            {
+                if (dialog.save.Enabled) throw new InvalidOperationException("Empty payment accepted.");
+                dialog.amount.Text = "123,45";
+                if (dialog.save.Enabled) throw new InvalidOperationException("Missing payment method accepted.");
+                dialog.method.SelectedIndex = dark ? 0 : 1;
+                if (refund && dialog.save.Enabled) throw new InvalidOperationException("Missing refund reason accepted.");
+                dialog.reason.Text = "  Неиспользованный остаток  ";
+                if (!dialog.save.Enabled) throw new InvalidOperationException("Valid payment rejected.");
+                foreach (var invalid in new[] { "0", "-1", "123,456", "1,000", KgsMoney.Format(cap + 1) })
+                {
+                    dialog.amount.Text = invalid;
+                    if (dialog.save.Enabled) throw new InvalidOperationException("Invalid amount accepted: " + invalid);
+                }
+                dialog.amount.Text = KgsMoney.Format(cap);
+                if (!dialog.save.Enabled) throw new InvalidOperationException("Exact payment cap rejected.");
+                dialog.amount.Text = dark ? "123,45" : "0.01";
+                var output = Path.Combine(Environment.CurrentDirectory, "artifacts", "ui");
+                Directory.CreateDirectory(output);
+                using var image = new Bitmap(dialog.Width, dialog.Height);
+                dialog.DrawToBitmap(image, new Rectangle(Point.Empty, dialog.Size));
+                image.Save(Path.Combine(output, $"{(refund ? "Refund" : "TopUp")}-{(dark ? "dark" : "light")}.png"));
+                dialog.save.PerformClick();
+            });
+            if (dialog.ShowDialog() != DialogResult.OK || dialog.Result is null || dialog.Result.AmountMinor != (dark ? 12345 : 1) ||
+                dialog.Result.Method != (dark ? "Cash" : "Transfer") || dialog.Result.Reason != (refund ? "Неиспользованный остаток" : "") ||
+                !Guid.TryParse(dialog.Result.OperationId, out _)) throw new InvalidOperationException("Payment dialog returned incorrect minor units or method.");
+            var wire = JsonSerializer.SerializeToElement(dialog.Result, ApiClient.Json);
+            if (wire.GetProperty("amountMinor").GetInt64() != dialog.Result.AmountMinor || wire.GetProperty("method").GetString() != dialog.Result.Method)
+                throw new InvalidOperationException("Payment wire representation changed amount or method.");
+        }
+        using var cancelled = new MoneyEditor(true, false, 10000, "Отмена операции");
+        cancelled.Shown += (_, _) => cancelled.BeginInvoke(() =>
+        {
+            cancelled.amount.Text = "100"; cancelled.method.SelectedIndex = 0;
+            cancelled.CancelButton!.PerformClick();
+        });
+        if (cancelled.ShowDialog() != DialogResult.Cancel || cancelled.Result is not null)
+            throw new InvalidOperationException("Cancelled payment produced an operation.");
+    }
+}
+
+internal sealed class PackageEditor : Form
+{
+    private readonly TextBox name = new() { MaxLength = 80, Width = 420 };
+    private readonly NumericUpDown minutes = new() { Minimum = 1, Maximum = 1440, Width = 180 };
+    private readonly NumericUpDown price = new() { Minimum = 0.01m, Maximum = 1_000_000m, DecimalPlaces = 2, Increment = 1, Width = 180 };
+    private readonly CheckBox active = new() { Text = "Доступен для новых покупок", AutoSize = true };
+    private readonly Button save = new() { Text = "Сохранить", AutoSize = true };
+    public PackageDraft? Result { get; private set; }
+
+    public PackageEditor(bool dark, string? id, string title, int duration, long amount, bool enabled)
+    {
+        Text = id is null ? "Новый тариф" : "Изменение тарифа";
+        ClientSize = new Size(500, 410); Font = new Font("Segoe UI", 11);
+        FormBorderStyle = FormBorderStyle.FixedDialog; MaximizeBox = false; MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16) };
+        name.Text = title; minutes.Value = duration; price.Value = amount / 100m; active.Checked = enabled;
+        layout.Controls.AddRange([new Label { Text = "Название", AutoSize = true }, name,
+            new Label { Text = "Длительность, минуты", AutoSize = true }, minutes,
+            new Label { Text = "Цена, сом", AutoSize = true }, price, active,
+            new Label { Text = "Изменения действуют на новые покупки.\nУсловия уже купленных сеансов сохраняются.", AutoSize = true }]);
+        var buttons = new FlowLayoutPanel { AutoSize = true };
+        var cancel = new Button { Text = "Отмена", DialogResult = DialogResult.Cancel, AutoSize = true };
+        buttons.Controls.AddRange([save, cancel]); layout.Controls.Add(buttons); Controls.Add(layout);
+        AcceptButton = save; CancelButton = cancel;
+        save.Enabled = !string.IsNullOrWhiteSpace(name.Text);
+        name.TextChanged += (_, _) => save.Enabled = !string.IsNullOrWhiteSpace(name.Text);
+        save.Click += (_, _) =>
+        {
+            // Commit pending numeric text before reading Values, including keyboard submission.
+            ValidateChildren();
+            Result = new(id, name.Text.Trim(), (int)minutes.Value, checked((long)(decimal.Round(price.Value, 2, MidpointRounding.ToEven) * 100)), active.Checked, Guid.NewGuid().ToString());
+            DialogResult = DialogResult.OK;
+        };
+        DesktopTheme.Apply(this, dark);
+    }
+
+    public static void Smoke()
+    {
+        foreach (var dark in new[] { true, false })
+        {
+            using var dialog = new PackageEditor(dark, "existing-id", "Прежний тариф", 60, 12345, true);
+            dialog.Shown += (_, _) => dialog.BeginInvoke(() =>
+            {
+                if (dialog.price.Value != 123.45m) throw new InvalidOperationException("Incorrect tariff amount.");
+                dialog.name.Text = " ";
+                if (dialog.save.Enabled) throw new InvalidOperationException("Blank tariff name accepted.");
+                dialog.name.Text = "Новый тариф"; dialog.minutes.Value = 90; dialog.price.Value = dark ? 199.99m : 199.999m; dialog.active.Checked = false;
+                var output = Path.Combine(Environment.CurrentDirectory, "artifacts", "ui");
+                Directory.CreateDirectory(output);
+                using var image = new Bitmap(dialog.Width, dialog.Height);
+                dialog.DrawToBitmap(image, new Rectangle(Point.Empty, dialog.Size));
+                image.Save(Path.Combine(output, $"Package-{(dark ? "dark" : "light")}.png"));
+                dialog.save.PerformClick();
+            });
+            if (dialog.ShowDialog() != DialogResult.OK || dialog.Result is not { Id: "existing-id", Name: "Новый тариф", Minutes: 90, Active: false } || dialog.Result.PriceMinor != (dark ? 19999 : 20000))
+                throw new InvalidOperationException("Tariff editor did not preserve ID, price or availability.");
+        }
+    }
+}
+
+internal static class GridExtensions
+{
+    public static void SetVisible(this DataGridViewColumn column, bool visible) => column.Visible = visible;
+}
+
+internal static class DesktopTheme
+{
+    public static void Apply(Control control, bool dark)
+    {
+        var background = dark ? Color.Black : SystemColors.Control;
+        var surface = dark ? Color.FromArgb(20, 20, 20) : SystemColors.Window;
+        var text = dark ? Color.FromArgb(230, 230, 230) : SystemColors.ControlText;
+        var border = dark ? Color.FromArgb(65, 65, 65) : SystemColors.ControlDark;
+        control.BackColor = background;
+        control.ForeColor = text;
+        if (control is TextBoxBase or ComboBox) control.BackColor = surface;
+        if (control is Button button)
+        {
+            button.UseVisualStyleBackColor = false;
+            button.BackColor = dark ? Color.FromArgb(30, 30, 30) : SystemColors.ControlLight;
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderColor = border;
+            button.FlatAppearance.MouseOverBackColor = dark ? Color.FromArgb(50, 50, 50) : SystemColors.ControlLightLight;
+            button.FlatAppearance.MouseDownBackColor = dark ? Color.FromArgb(65, 65, 65) : SystemColors.ControlDark;
+        }
+        if (control is DataGridView grid)
+        {
+            grid.BackgroundColor = background;
+            grid.GridColor = border;
+            grid.EnableHeadersVisualStyles = false;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = dark ? Color.FromArgb(30, 30, 30) : SystemColors.Control;
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = text;
+            grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = grid.ColumnHeadersDefaultCellStyle.BackColor;
+            grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = text;
+            grid.DefaultCellStyle.BackColor = surface;
+            grid.DefaultCellStyle.ForeColor = text;
+            grid.DefaultCellStyle.SelectionBackColor = dark ? Color.FromArgb(35, 74, 60) : SystemColors.Highlight;
+            grid.DefaultCellStyle.SelectionForeColor = dark ? text : SystemColors.HighlightText;
+            grid.AlternatingRowsDefaultCellStyle.BackColor = dark ? Color.FromArgb(27, 27, 27) : SystemColors.ControlLightLight;
+        }
+        foreach (Control child in control.Controls) Apply(child, dark);
+    }
+    public static void DrawTab(TabControl tabs, DrawItemEventArgs e, bool dark)
+    {
+        if (e.Index < 0) return;
+        var selected = e.Index == tabs.SelectedIndex;
+        var background = dark ? (selected ? Color.FromArgb(35, 74, 60) : Color.FromArgb(24, 24, 24))
+            : (selected ? SystemColors.Window : SystemColors.Control);
+        using var brush = new SolidBrush(background);
+        e.Graphics.FillRectangle(brush, e.Bounds);
+        TextRenderer.DrawText(e.Graphics, tabs.TabPages[e.Index].Text, tabs.Font, e.Bounds,
+            dark ? Color.FromArgb(230, 230, 230) : SystemColors.ControlText,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+    }
+}

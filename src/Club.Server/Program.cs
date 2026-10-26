@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Threading.RateLimiting;
 using Club.Server;
+using Club.Protocol;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -10,13 +11,52 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 
-var builder = WebApplication.CreateBuilder(args);
-// The first prototype is deliberately restricted to this machine, without a LAN exception.
-builder.WebHost.UseUrls("http://127.0.0.1:5080");
-builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 16_384);
+if (args.Any(a => a.StartsWith("--recover", StringComparison.OrdinalIgnoreCase) && a != "--recover-owner"))
+{
+    Console.Error.WriteLine("Неизвестная команда восстановления. Используйте --recover-owner; сервер не запущен.");
+    Environment.ExitCode = 1;
+    return;
+}
+
+// Standalone maintenance switches are not key/value configuration options. Leaving one
+// in the configuration provider consumes the following option as its value.
+var configurationArgs = args.Where(a => a is not ("--create-owner" or "--recover-owner" or "--open-browser")).ToArray();
+var builder = WebApplication.CreateBuilder(configurationArgs);
 var dataDirectory = Path.GetFullPath(builder.Configuration["Club:DataDirectory"] ??
     Path.Combine(AppContext.BaseDirectory, ".data"));
-Directory.CreateDirectory(dataDirectory);
+
+if (args.Contains("--recover-owner"))
+{
+    try
+    {
+        if (args.Count(a => a == "--recover-owner") != 1 || args.Any(a => a is "--create-owner" or "--verify-backup" or "--restore-backup"))
+            throw new RuleException("Не объединяйте восстановление владельца с другими служебными командами.");
+        if (OperatingSystem.IsWindows())
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            if (!new System.Security.Principal.WindowsPrincipal(identity).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+                throw new UnauthorizedAccessException("Откройте консоль от имени администратора Windows.");
+        }
+        Console.WriteLine("Локальное восстановление владельца. Сервер должен быть остановлен; перед изменением будет создана копия.");
+        Console.Write("Логин существующего владельца: ");
+        var username = Console.ReadLine() ?? "";
+        Console.Write("Новый пароль (10–128 символов, ввод скрыт): ");
+        var password = ReadPassword();
+        Console.Write("Повторите пароль: ");
+        var confirmation = ReadPassword();
+        Console.Write("Причина восстановления (без пароля): ");
+        var reason = Console.ReadLine() ?? "";
+        var backup = OwnerRecovery.Reset(dataDirectory, username, password, confirmation, reason);
+        Console.WriteLine("Доступ владельца восстановлен; прежние входы отозваны. Копия до изменения: " + backup);
+        Console.WriteLine("Запустите сервер обычной командой. Возобновление сеансов подтверждается сотрудником.");
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or RuleException or Microsoft.Data.Sqlite.SqliteException or InvalidDataException)
+    {
+        Console.Error.WriteLine("Восстановление не выполнено: " + ex.Message);
+        Environment.ExitCode = 1;
+    }
+    return;
+}
 
 if (args.Contains("--verify-backup") || args.Contains("--restore-backup"))
 {
@@ -28,6 +68,8 @@ if (args.Contains("--verify-backup") || args.Contains("--restore-backup"))
     Console.WriteLine(restore ? "Копия восстановлена. Предыдущая база сохранена. Сеансы потребуют ручного возобновления." : "Копия читается; целостность и баланс журнала проверены.");
     return;
 }
+LanHosting.Configure(builder);
+Directory.CreateDirectory(dataDirectory);
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IPasswordHasher<Account>, PasswordHasher<Account>>();
@@ -53,7 +95,8 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     options.Events.OnValidatePrincipal = context =>
     {
         var id = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (id is null || context.HttpContext.RequestServices.GetRequiredService<ClubStore>().FindAccount(id) is null) context.RejectPrincipal();
+        var account = id is null ? null : context.HttpContext.RequestServices.GetRequiredService<ClubStore>().FindAccount(id);
+        if (account is null || account.Disabled || context.Principal?.FindFirstValue("credentialStamp") != ClubStore.CredentialStamp(account)) context.RejectPrincipal();
         return Task.CompletedTask;
     };
 });
@@ -66,6 +109,9 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
+    options.AddPolicy("device", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "local", _ => new FixedWindowRateLimiterOptions
+        { PermitLimit = 120, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
     options.AddPolicy("auth", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "local", _ => new FixedWindowRateLimiterOptions
         {
@@ -96,7 +142,15 @@ app.Use(async (context, next) =>
     context.Response.Headers.XContentTypeOptions = "nosniff";
     context.Response.Headers["Referrer-Policy"] = "no-referrer";
     context.Response.Headers.CacheControl = "no-store";
-    try { await next(); }
+    try
+    {
+        if (context.Connection.RemoteIpAddress is { } address && !IPAddress.IsLoopback(address))
+        {
+            if (!context.Request.IsHttps) throw new RuleException("Для LAN требуется HTTPS.", 403);
+            if (context.Request.Path.StartsWithSegments("/api/admin")) throw new RuleException("Управление доступно только на ПК администратора.", 403);
+        }
+        await next();
+    }
     catch (RuleException ex)
     {
         context.Response.StatusCode = ex.Status;
@@ -118,6 +172,13 @@ app.Use(async (context, next) =>
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.UseAuthentication();
+app.Use(async (context, next) =>
+{
+    if (context.Connection.RemoteIpAddress is { } address && !IPAddress.IsLoopback(address) &&
+        (context.User.IsInRole("Owner") || context.User.IsInRole("Admin")))
+        throw new RuleException("Сотрудник может работать только на ПК администратора.", 403);
+    await next();
+});
 app.UseAuthorization();
 app.UseRateLimiter();
 app.Use(async (context, next) =>
@@ -135,6 +196,12 @@ app.Use(async (context, next) =>
     await next();
 });
 
+// Device endpoint uses its own credential and accepts HTTPS only; it never uses cookie authority.
+app.MapPost("/device/heartbeat", (HttpContext context, DeviceReport report) =>
+{
+    if (!context.Request.IsHttps) throw new RuleException("Для устройства требуется HTTPS.", 403);
+    return store.DeviceHeartbeat(context.Request.Headers["X-Club-Device"], report);
+}).RequireRateLimiting("device");
 app.MapGet("/health", () => Results.Ok(new { status = "ok", prototype = true }));
 app.MapGet("/api/security", (HttpContext context, IAntiforgery antiforgery) =>
     Results.Ok(new { token = antiforgery.GetAndStoreTokens(context).RequestToken, ownerExists = store.HasOwner() }));
@@ -157,9 +224,11 @@ app.MapPost("/api/login", async (RegisterRequest request, HttpContext context) =
 {
     var account = store.FindAccount((request.Username ?? "").Trim(), true);
     if (account is null || !store.VerifyPassword(account, request.Password ?? "")) throw new RuleException("Неверный логин или пароль.", 401);
+    if (account.Role is "Owner" or "Admin" && context.Connection.RemoteIpAddress is { } remote && !IPAddress.IsLoopback(remote))
+        throw new RuleException("Вход сотрудника доступен только на ПК администратора.", 403);
     var identity = new ClaimsIdentity(new[]
     {
-        new Claim(ClaimTypes.NameIdentifier, account.Id), new Claim(ClaimTypes.Name, account.Username), new Claim(ClaimTypes.Role, account.Role)
+        new Claim(ClaimTypes.NameIdentifier, account.Id), new Claim(ClaimTypes.Name, account.Username), new Claim(ClaimTypes.Role, account.Role), new Claim("credentialStamp", ClubStore.CredentialStamp(account))
     }, CookieAuthenticationDefaults.AuthenticationScheme);
     await context.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity));
     return Results.Ok(new { account.Username, account.Role });
@@ -169,14 +238,33 @@ app.MapPost("/api/logout", async (HttpContext context) =>
     await context.SignOutAsync();
     return Results.Ok();
 }).RequireAuthorization();
+app.MapPost("/api/password", async (HttpContext context, PasswordChangeRequest request) =>
+{
+    store.ChangePassword(Id(context.User), request);
+    await context.SignOutAsync();
+    return Results.Ok(new { changed = true });
+}).RequireAuthorization().RequireRateLimiting("auth");
 app.MapGet("/api/state", (ClaimsPrincipal user) => store.Snapshot(Id(user))).RequireAuthorization();
-app.MapPost("/api/purchases", (ClaimsPrincipal user, PurchaseRequest request) => store.Purchase(Id(user), request)).RequireAuthorization("Customer");
+app.MapPost("/api/purchases", (ClaimsPrincipal user, PurchaseRequest request, HttpContext context) => store.Purchase(Id(user), request, context.Request.Headers["X-Club-Device"])).RequireAuthorization("Customer");
 var admin = app.MapGroup("/api/admin").RequireAuthorization("Staff");
 admin.MapPost("/staff", (ClaimsPrincipal user, RegisterRequest request) =>
 {
     var account = store.CreateAccount(request.Username ?? "", request.Password ?? "", "Admin", Id(user));
     return Results.Ok(new { account.Id, account.Username, account.Role });
 }).RequireAuthorization("Owner");
+admin.MapPost("/staff/{id}/access", (ClaimsPrincipal user, string id, StaffAccessRequest request) =>
+{
+    store.ManageStaff(Id(user), id, request, null); return Results.Ok();
+}).RequireAuthorization("Owner");
+admin.MapPost("/staff/{id}/password", (ClaimsPrincipal user, string id, StaffPasswordRequest request) =>
+{
+    store.ManageStaff(Id(user), id, null, request); return Results.Ok();
+}).RequireAuthorization("Owner");
+admin.MapPost("/customers/{id}/password", (ClaimsPrincipal user, string id, CustomerPasswordRequest request) =>
+{
+    store.ResetCustomerPassword(Id(user), id, request); return Results.Ok();
+});
+admin.MapPost("/devices", (ClaimsPrincipal user, DeviceBinding request) => store.BindDevice(Id(user), request));
 admin.MapPost("/computers", (ClaimsPrincipal user, ComputerRequest request) => store.AddComputer(Id(user), request));
 admin.MapPost("/packages", (ClaimsPrincipal user, PackageRequest request) => store.SavePackage(Id(user), request));
 admin.MapPost("/topups", (ClaimsPrincipal user, TopUpRequest request) => store.TopUp(Id(user), request));

@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><RootNamespace>Club.Desktop</RootNamespace><OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><EnableWindowsTargeting>true</EnableWindowsTargeting><RuntimeIdentifiers>win-x64</RuntimeIdentifiers><DefineConstants>$(DefineConstants);ADMIN</DefineConstants></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Club.Protocol/Club.Protocol.csproj" /><Compile Include="../Club.Desktop/Desktop.cs" Link="Desktop.cs" /></ItemGroup>
+</Project>
