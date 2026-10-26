@@ -6,6 +6,9 @@ $verify = Join-Path $PSScriptRoot 'Verify-AgentPayload.ps1'
 $root = Join-Path $env:ProgramFiles 'Club'
 $data = Join-Path $env:ProgramData 'Club\Agent'
 $journal = Join-Path $data 'update-in-progress.json'
+# Exclusive handle serializes updater and repair; OS releases it after process termination.
+$maintenanceLock = [IO.File]::Open((Join-Path $data 'maintenance.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+try {
 if (Test-Path -LiteralPath $journal) { throw 'An interrupted update exists. Recover it using windows-pilot.md before retrying.' }
 & $verify -PayloadRoot $PayloadRoot
 & $verify -PayloadRoot $root
@@ -107,3 +110,5 @@ try {
     }
     throw $failure
 }
+
+} finally { $maintenanceLock.Dispose() }

@@ -150,6 +150,15 @@ try {
     Write-Host 'PASS: installed LocalSystem service, HTTPS device authentication, protected files/pipe, real catalog replacement and malformed-message resilience.'
     Set-Grant 'Running' 1 60000
     Wait-Until { (Read-Json (Join-Path $work 'report.json')).state -eq 'Running' } 'Running grant was not applied.'
+    $beforeUpdatePid = Service-Pid
+    Disable-LocalUser -Name $visitor.Name
+    try {
+        $rejected = $false
+        try { & (Join-Path $setup 'Update-Agent.ps1') -PayloadRoot (Split-Path -Parent $setup) }
+        catch { $rejected = $_.Exception.Message -like '*checkpoint is active*' }
+        if (-not $rejected -or (Service-Pid) -ne $beforeUpdatePid) { throw 'Active paid session update did not fail before stopping service.' }
+    } finally { Enable-LocalUser -Name $visitor.Name }
+    Write-Host 'PASS: update refused during Running without restarting the service.'
     Stop-FixtureServer
     Probe $visitorCredential 'Running'
     $before = Read-Json (Join-Path $data 'session.json')

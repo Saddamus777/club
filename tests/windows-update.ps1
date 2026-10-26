@@ -17,6 +17,14 @@ try {
         throw 'Enabled visitor account was not rejected before interrupting service.'
     }
     Disable-LocalUser -Name $VisitorUser
+    $held = [IO.File]::Open((Join-Path $data 'maintenance.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $rejected = $false
+        try { & $update -PayloadRoot $PayloadRoot } catch { $rejected = $true }
+        if (-not $rejected -or (Get-CimInstance Win32_Service -Filter "Name='ClubAgent'").ProcessId -ne $beforePid) {
+            throw 'Concurrent maintenance was not refused before interrupting service.'
+        }
+    } finally { $held.Dispose() }
     & $update -PayloadRoot $PayloadRoot
     if ((Get-LocalUser -Name $VisitorUser).Enabled) { throw 'Updater enabled visitor without review.' }
     $archives = @(Get-ChildItem -LiteralPath $root -Directory -Filter '.update-*' | Where-Object {
@@ -60,7 +68,7 @@ try {
     if ((Get-Service ClubAgent).Status -ne 'Running' -or (Test-Path (Join-Path $data 'update-in-progress.json')) -or
         (Get-FileHash (Join-Path $root 'Agent\Club.Agent.exe')).Hash -ne $originalExe) { throw 'Interrupted update recovery failed.' }
     & (Join-Path $PayloadRoot 'Setup\Verify-AgentPayload.ps1') -PayloadRoot $root
-    Write-Host 'PASS: maintenance update, previous payload retained, enabled visitor and corrupt bundle rejected without restart, invalid EXE rolled back, device configuration/catalog preserved; interrupted move recovered without relying on journal flags.'
+    Write-Host 'PASS: exclusive maintenance update, previous payload retained, enabled visitor and corrupt bundle rejected without restart, invalid EXE rolled back, device configuration/catalog preserved; interrupted move recovered without relying on journal flags.'
 } finally {
     Enable-LocalUser -Name $VisitorUser
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }

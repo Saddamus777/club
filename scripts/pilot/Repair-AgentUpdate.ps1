@@ -5,6 +5,9 @@ $ErrorActionPreference = 'Stop'
 $root = Join-Path $env:ProgramFiles 'Club'
 $data = Join-Path $env:ProgramData 'Club\Agent'
 $journal = Join-Path $data 'update-in-progress.json'
+# Exclusive handle serializes updater and repair; OS releases it after process termination.
+$maintenanceLock = [IO.File]::Open((Join-Path $data 'maintenance.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+try {
 $state = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
 $work = [IO.Path]::GetFullPath([string]$state.workDirectory)
 if ($state.version -ne 1 -or (Split-Path -Parent $work) -ne $root -or
@@ -84,3 +87,5 @@ try {
     throw 'Recovered files did not start. Keep visitor disabled; recovery files and journal were retained.'
 }
 Write-Host 'Previous payload restored. Visitor remains disabled; verify server/session state before enabling it.'
+
+} finally { $maintenanceLock.Dispose() }
